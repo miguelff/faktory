@@ -53,6 +53,16 @@ bin/faktory transition --help   # see CLI usage
 
 ## Run
 
+**One command** (from a plain terminal, not inside herdr) — opens a new
+terminal window with a dedicated herdr session and Faktory running inside it:
+
+```sh
+scripts/faktory-up.sh            # session "faktory", instance "fk"
+scripts/faktory-up.sh work main  # custom session + instance
+```
+
+Or manually:
+
 ```sh
 bin/faktory sync   --instance omnia          # pull candidates into the task table
 bin/faktory tasks  --instance omnia          # list tasks
