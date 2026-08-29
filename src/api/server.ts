@@ -65,6 +65,26 @@ export function createApiServer(deps: ApiDeps): Server {
     }
   });
 
+  route("POST", "/api/tasks/:id/comment", async (req, res, p) => {
+    const body = await readJson(req);
+    const id = Number(p.id);
+    if (!deps.engine.tasks.byId(id)) return json(res, 404, { error: "not found" });
+    if (body.note == null && body.status == null && body.agent == null && body.data == null) {
+      return json(res, 400, { error: "comment requires at least one of note, status, agent, data" });
+    }
+    try {
+      const rendered = await deps.engine.comment(id, {
+        agent: body.agent,
+        status: body.status,
+        note: body.note,
+        data: body.data,
+      });
+      json(res, 200, { ok: true, body: rendered });
+    } catch (e) {
+      json(res, 500, { error: String((e as Error).message) });
+    }
+  });
+
   route("POST", "/api/tasks/:id/dispatch", async (req, res, p) => {
     if (!deps.herdr) return json(res, 503, { error: "herdr is not connected" });
     const body = await readJson(req);

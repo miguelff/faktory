@@ -15,6 +15,11 @@ claude, codex, ...) needs only a shell with `curl` and `herdr`.
 
 - Never move a task by editing the source (Notion) directly — always go through
   the Faktory API so the state machine and audit log stay authoritative.
+- Leave a **handoff trail**: at each meaningful edge (claim, dispatch, blocked,
+  review verdict, deploy) `POST /api/tasks/:id/comment` with a short `note` and,
+  when useful, `data` (e.g. `{ "iteration": 2, "pr": "123" }`). The comment lands
+  on the work unit so an operator can follow the loop's reasoning in the source.
+  `status`/`agent` default from the task — usually just pass a `note`.
 - Respect the lifecycle: a `409` from the API means the move is illegal; stop
   and inspect (`GET /api/tasks/:id`) rather than forcing.
 - One agent per task, in its own herdr worktree workspace. Never reuse a pane.
@@ -41,7 +46,8 @@ is the contract; you supply the judgement at each edge.
     scope), answer with `herdr agent prompt <name> "<answer>"`. If it is a real
     decision for a human, transition the task to `blocked` and stop touching it.
   - Agent `done` → read the outcome. PR opened and ready → transition to
-    `reviewing`, record the PR URL in your notes.
+    `reviewing`, record the PR URL in your notes and as a handoff comment
+    (`{ "note": "blind review passed", "data": { "pr": "<url>" } }`).
 - **`reviewing`** — when the kickoff loop reports its blind review passed and
   the PR is ready-for-review, transition `reviewing → ready_to_deploy`. If the
   review surfaced blockers the agent could not fix, transition to `blocked`.
