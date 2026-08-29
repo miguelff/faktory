@@ -6,11 +6,20 @@ import type { HerdrClient } from "./client.ts";
 const exec = promisify(execFile);
 
 /**
- * herdr-side mechanics of bootstrapping the Faktory workbench around the
- * `serve` pane: a TUI pane and an orchestrator agent pane. The orchestrator
+ * herdr-side mechanics of bootstrapping the Faktory workbench. Each component —
+ * the API/web `serve`, the TUI, and the orchestrator agent — lives in its own
+ * **named herdr tab** ("serve" / "tui" / "orchestrator") rather than a split
+ * pane, so operators can find each one from herdr's tab bar. The orchestrator
  * agent is the policy brain — it runs a continuous loop over the task state
  * machine through the HTTP API (see skills/faktory-orchestrator).
  */
+
+/** Labels for the named tabs the workbench provisions, one per component. */
+export const TAB_LABELS = {
+  serve: "serve",
+  tui: "tui",
+  orchestrator: "orchestrator",
+} as const;
 export interface WorkbenchOptions {
   instance: string;
   prefix: string;
@@ -21,7 +30,7 @@ export interface WorkbenchOptions {
   fromPaneId: string;
   tui: boolean;
   agent: boolean;
-  /** Detached mode: command that runs the API/web server in its own pane. */
+  /** Detached mode: command that runs the API/web server in its own tab. */
   serveCommand?: string;
 }
 
@@ -72,21 +81,45 @@ export function paneIdOf(result: any): string {
   return id;
 }
 
-async function splitPane(
+/**
+ * Create a named tab in a workspace and return its id plus the id of the pane
+ * herdr opens inside it (where the component's command is then run).
+ */
+async function createTab(
   herdr: HerdrClient,
-  fromPaneId: string,
-  direction: "right" | "down",
-  ratio: number,
+  workspaceId: string,
+  label: string,
   cwd: string,
-): Promise<string> {
-  const result = await herdr.request<any>("pane.split", {
-    target_pane_id: fromPaneId,
-    direction,
-    ratio,
+): Promise<{ tabId: string; paneId: string }> {
+  const result = await herdr.request<any>("tab.create", {
+    workspace_id: workspaceId,
+    label,
     cwd,
     focus: false,
   });
-  return paneIdOf(result);
+  const tab = result?.tab ?? result;
+  const tabId = tab?.tab_id ?? tab?.id;
+  if (!tabId) throw new Error(`herdr tab.create returned no tab id: ${JSON.stringify(result)}`);
+  return { tabId, paneId: paneIdOf({ pane: result?.root_pane }) };
+}
+
+async function renameTab(herdr: HerdrClient, tabId: string, label: string): Promise<void> {
+  await herdr.request("tab.rename", { tab_id: tabId, label });
+}
+
+async function paneInfo(herdr: HerdrClient, paneId: string): Promise<{ tabId: string; workspaceId: string }> {
+  const info = (await herdr.request<any>("pane.get", { pane_id: paneId }))?.pane ?? {};
+  const tabId = info.tab_id;
+  const workspaceId = info.workspace_id;
+  if (!tabId || !workspaceId) throw new Error(`pane ${paneId} has no tab/workspace id: ${JSON.stringify(info)}`);
+  return { tabId, workspaceId };
+}
+
+/** Rename the tab that owns a pane — used so `serve` labels its own tab. */
+export async function labelPaneTab(herdr: HerdrClient, paneId: string, label: string): Promise<string> {
+  const { tabId } = await paneInfo(herdr, paneId);
+  await renameTab(herdr, tabId, label);
+  return tabId;
 }
 
 async function runInPane(paneId: string, command: string): Promise<void> {
@@ -145,9 +178,9 @@ export async function startOrchestrator(
 
 /**
  * Detached bootstrap: serve runs outside herdr and owns the session. Sets up a
- * dedicated workspace (labelled faktory:<instance>) with the TUI on the left
- * and the orchestrator agent on the right. Idempotent: a session that already
- * has the labelled workspace is left untouched.
+ * dedicated workspace (labelled faktory:<instance>) whose components each get
+ * their own named tab: serve, tui, orchestrator. Idempotent: a session that
+ * already has the labelled workspace is reconciled, not rebuilt.
  */
 export async function bootstrapDetached(
   herdr: HerdrClient,
@@ -158,31 +191,32 @@ export async function bootstrapDetached(
   const existing = workspaces.find((w) => w.label === label);
   if (existing) return reattachWorkspace(herdr, existing.workspace_id ?? existing.id, opts);
 
-  const { workspaceId, rootPaneId } = await claimWorkspace(herdr, label, opts.repoCwd, workspaces);
+  const { workspaceId, rootPaneId, rootTabId } = await claimWorkspace(herdr, label, opts.repoCwd, workspaces);
   const result: WorkbenchResult = { workspaceId };
 
   const cdRepo = `cd ${opts.repoCwd} && `;
-  let anchor = rootPaneId;
-  let anchorUsed = false;
-  const nextPane = async (ratio: number) => {
-    if (!anchorUsed) {
-      anchorUsed = true;
-      return anchor;
+  // The workspace already has one (root) tab; reuse it for the first component
+  // and open a fresh named tab for each of the rest.
+  let rootUsed = false;
+  const nextTab = async (tabLabel: string): Promise<string> => {
+    if (!rootUsed) {
+      rootUsed = true;
+      await renameTab(herdr, rootTabId, tabLabel);
+      return rootPaneId;
     }
-    anchor = await splitPane(herdr, anchor, "right", ratio, opts.repoCwd);
-    return anchor;
+    return (await createTab(herdr, workspaceId, tabLabel, opts.repoCwd)).paneId;
   };
 
   if (opts.serveCommand) {
-    result.servePaneId = await nextPane(0);
+    result.servePaneId = await nextTab(TAB_LABELS.serve);
     await runInPane(result.servePaneId, `${cdRepo}${opts.serveCommand}`);
   }
   if (opts.tui) {
-    result.tuiPaneId = await nextPane(0.67);
+    result.tuiPaneId = await nextTab(TAB_LABELS.tui);
     await runInPane(result.tuiPaneId, `${cdRepo}${opts.faktoryBin} tui --instance ${opts.instance}`);
   }
   if (opts.agent) {
-    const agentPaneId = await nextPane(0.5);
+    const agentPaneId = await nextTab(TAB_LABELS.orchestrator);
     const started = await startOrchestrator(herdr, agentPaneId, opts);
     result.agentPaneId = agentPaneId;
     result.agentName = started.agentName;
@@ -200,8 +234,9 @@ export function isServeProcess(cmdline: string): boolean {
 }
 
 /**
- * Reconcile an existing workspace: panes are preserved and idle shell panes
- * reused before splitting new ones; a dead TUI or orchestrator is restarted.
+ * Reconcile an existing workspace: tabs are preserved; a dead component is
+ * restarted by reusing its same-labelled idle tab, or opening a fresh named
+ * tab when none can be reused.
  */
 async function reattachWorkspace(
   herdr: HerdrClient,
@@ -210,18 +245,28 @@ async function reattachWorkspace(
 ): Promise<WorkbenchResult> {
   const result: WorkbenchResult = { workspaceId, alreadyBootstrapped: true };
   const panes: any[] = (await herdr.request<any>("pane.list", { workspace_id: workspaceId }))?.panes ?? [];
-  const anchor = panes[0]?.pane_id ?? panes[0]?.id;
-  if (!anchor) throw new Error(`workspace ${workspaceId} has no pane`);
+  if (!panes.length) throw new Error(`workspace ${workspaceId} has no pane`);
+  const tabs: any[] = (await herdr.request<any>("tab.list", { workspace_id: workspaceId }))?.tabs ?? [];
   const processes = await Promise.all(panes.map((p) => paneProcess(herdr, p.pane_id ?? p.id)));
-  const idle = processes.filter((p) => p.idleShell).map((p) => p.paneId);
-  const claimPane = async () => idle.shift() ?? (await splitPane(herdr, anchor, "right", 0.5, opts.repoCwd));
+  const idleByPane = new Map(processes.map((p) => [p.paneId, p.idleShell]));
+
+  // Prefer restarting into the component's own (idle) tab; else open a new one.
+  const claimTab = async (tabLabel: string): Promise<string> => {
+    const tab = tabs.find((t) => t.label === tabLabel);
+    if (tab) {
+      const tabId = tab.tab_id ?? tab.id;
+      const reusable = panes.find((p) => p.tab_id === tabId && idleByPane.get(p.pane_id ?? p.id));
+      if (reusable) return reusable.pane_id ?? reusable.id;
+    }
+    return (await createTab(herdr, workspaceId, tabLabel, opts.repoCwd)).paneId;
+  };
 
   if (opts.serveCommand && !processes.some((p) => isServeProcess(p.cmdline))) {
-    result.servePaneId = await claimPane();
+    result.servePaneId = await claimTab(TAB_LABELS.serve);
     await runInPane(result.servePaneId, `cd ${opts.repoCwd} && ${opts.serveCommand}`);
   }
   if (opts.tui && !processes.some((p) => isTuiProcess(p.cmdline))) {
-    result.tuiPaneId = await claimPane();
+    result.tuiPaneId = await claimTab(TAB_LABELS.tui);
     await runInPane(result.tuiPaneId, `cd ${opts.repoCwd} && ${opts.faktoryBin} tui --instance ${opts.instance}`);
   }
   if (opts.agent) {
@@ -230,7 +275,7 @@ async function reattachWorkspace(
       result.agentName = agentName;
       result.agentAlreadyRunning = true;
     } else {
-      result.agentPaneId = await claimPane();
+      result.agentPaneId = await claimTab(TAB_LABELS.orchestrator);
       const started = await startOrchestrator(herdr, result.agentPaneId, opts);
       result.agentName = started.agentName;
       result.agentAlreadyRunning = started.alreadyRunning;
@@ -245,35 +290,38 @@ async function claimWorkspace(
   label: string,
   cwd: string,
   workspaces: any[],
-): Promise<{ workspaceId: string; rootPaneId: string }> {
+): Promise<{ workspaceId: string; rootPaneId: string; rootTabId: string }> {
   const panes: any[] = (await herdr.request<any>("pane.list", {}))?.panes ?? [];
   const agents: any[] = (await herdr.request<any>("agent.list", {}))?.agents ?? [];
   if (workspaces.length === 1 && panes.length === 1 && agents.length === 0) {
     const workspaceId = workspaces[0].workspace_id ?? workspaces[0].id;
     await herdr.request("workspace.rename", { workspace_id: workspaceId, label });
-    return { workspaceId, rootPaneId: panes[0].pane_id ?? panes[0].id };
+    const root = panes[0];
+    return { workspaceId, rootPaneId: root.pane_id ?? root.id, rootTabId: root.tab_id };
   }
   const created = await herdr.request<any>("workspace.create", { label, cwd, focus: true });
   const workspaceId = created?.workspace?.workspace_id ?? created?.workspace?.id ?? created?.workspace_id;
   if (!workspaceId) throw new Error(`herdr workspace.create returned no workspace id: ${JSON.stringify(created)}`);
   const wsPanes: any[] = (await herdr.request<any>("pane.list", { workspace_id: workspaceId }))?.panes ?? [];
-  const rootPaneId = wsPanes[0]?.pane_id ?? wsPanes[0]?.id;
-  if (!rootPaneId) throw new Error(`workspace ${workspaceId} has no pane`);
-  return { workspaceId, rootPaneId };
+  const root = wsPanes[0];
+  if (!root?.pane_id && !root?.id) throw new Error(`workspace ${workspaceId} has no pane`);
+  return { workspaceId, rootPaneId: root.pane_id ?? root.id, rootTabId: root.tab_id };
 }
 
 /**
- * Layout, split from the serve pane — the agent loop sits next to the TUI:
- *   serve | tui | orchestrator agent
+ * Attached bootstrap: `serve` already runs in its own pane (`fromPaneId`); this
+ * opens the TUI and orchestrator agent each in their own named tab within the
+ * same workspace. `serve` labels its own tab via labelPaneTab.
  */
 export async function bootstrapWorkbench(
   herdr: HerdrClient,
   opts: WorkbenchOptions,
 ): Promise<WorkbenchResult> {
   const result: WorkbenchResult = {};
+  const { workspaceId } = await paneInfo(herdr, opts.fromPaneId);
 
   if (opts.tui) {
-    result.tuiPaneId = await splitPane(herdr, opts.fromPaneId, "right", 0.5, opts.repoCwd);
+    result.tuiPaneId = (await createTab(herdr, workspaceId, TAB_LABELS.tui, opts.repoCwd)).paneId;
     await runInPane(result.tuiPaneId, `${opts.faktoryBin} tui --instance ${opts.instance}`);
   }
 
@@ -283,8 +331,7 @@ export async function bootstrapWorkbench(
       result.agentName = agentName;
       result.agentAlreadyRunning = true;
     } else {
-      const anchor = result.tuiPaneId ?? opts.fromPaneId;
-      result.agentPaneId = await splitPane(herdr, anchor, "right", 0.5, opts.repoCwd);
+      result.agentPaneId = (await createTab(herdr, workspaceId, TAB_LABELS.orchestrator, opts.repoCwd)).paneId;
       const started = await startOrchestrator(herdr, result.agentPaneId, opts);
       result.agentName = started.agentName;
       result.agentAlreadyRunning = started.alreadyRunning;

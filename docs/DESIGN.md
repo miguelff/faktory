@@ -35,7 +35,8 @@ itself, and manages herdr workspaces/panes/agents through herdr's socket API.
 Faktory is a **deterministic mechanism**. It owns bookkeeping, the state
 machine, herdr mechanics, and source I/O. It never makes judgement calls.
 
-The **orchestrator agent** is the *policy brain*. It runs in a herdr pane as
+The **orchestrator agent** is the *policy brain*. It runs in its own named
+herdr tab ("orchestrator", alongside the "serve" and "tui" tabs) as
 `pi`/`claude`/`codex`/`hermes` and drives Faktory through the HTTP API + skills:
 it claims the next task, dispatches `/kickoff`, watches, interprets blind
 reviews, decides deploys, and repairs stuck state. Judgement lives in the agent;
