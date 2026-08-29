@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { backlogDatabaseProperties, notionOAuthAvailable } from "../src/setup.ts";
+import { backlogDatabaseProperties, notionIdFromLink, notionOAuthAvailable } from "../src/setup.ts";
 import { DISCOVERABLE } from "../src/core/lifecycle.ts";
 
 test("created backlog database carries title, ownership columns, and priority", () => {
@@ -28,4 +28,19 @@ test("oauth availability requires both client credentials", () => {
     if (saved.id) process.env.FAKTORY_NOTION_CLIENT_ID = saved.id;
     if (saved.secret) process.env.FAKTORY_NOTION_CLIENT_SECRET = saved.secret;
   }
+});
+
+test("notionIdFromLink extracts the id from pasted links and bare ids", () => {
+  const dashed = "328433c3-9871-805d-ace6-eae8987ce6c3";
+  assert.equal(notionIdFromLink("https://www.notion.so/acme/Backlog-328433c39871805dace6eae8987ce6c3"), dashed);
+  assert.equal(notionIdFromLink("https://www.notion.so/acme/Backlog-328433c39871805dace6eae8987ce6c3?v=aaaabbbbccccddddeeeeffff00001111"), dashed);
+  assert.equal(notionIdFromLink(dashed), dashed);
+  assert.equal(notionIdFromLink("328433c39871805dace6eae8987ce6c3"), dashed);
+  assert.equal(
+    notionIdFromLink("https://www.notion.so/acme/Parent-aaaabbbbccccddddeeeeffff00001111?p=328433c39871805dace6eae8987ce6c3&pm=s"),
+    dashed,
+    "a peek link resolves to the page actually open",
+  );
+  assert.equal(notionIdFromLink("https://www.notion.so/acme/just-a-page"), null);
+  assert.equal(notionIdFromLink("not a link at all"), null);
 });
