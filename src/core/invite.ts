@@ -58,6 +58,12 @@ export function decodeInvite(str: string): Invite {
  * detect when a colleague is joining a datasource they already have a config
  * for. For Notion this is the database id, normalized so dashed and dashless
  * forms match; other kinds fall back to a stable stringification of the config.
+ *
+ * Caveat for new kinds: the generic fallback hashes the *whole* config, so a
+ * stored config and an invite config that differ by even one incidental field
+ * (e.g. a mapping tweak) would look like different datasources and slip past
+ * duplicate-join detection. Add a kind-specific branch that keys on the true
+ * datasource identity (like Notion's databaseId) when you add a work source.
  */
 export function datasourceIdentity(kind: string, config: Record<string, unknown>): string {
   if (kind === "notion" && typeof config.databaseId === "string") {

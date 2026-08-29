@@ -2,7 +2,7 @@ import * as readline from "node:readline/promises";
 import { stdin, stdout } from "node:process";
 import { createServer } from "node:http";
 import { execFile } from "node:child_process";
-import { ensureInstanceDir, instanceRef } from "./core/instance.ts";
+import { ensureInstanceDir, instanceRef, listInstances } from "./core/instance.ts";
 import { getSecret, openDb, setConfig, setSecret } from "./core/db.ts";
 import { createSource } from "./sources/factory.ts";
 import { FAKTORY_STATUSES } from "./core/lifecycle.ts";
@@ -303,16 +303,23 @@ export interface JoinOptions {
  */
 export async function joinFromInvite(invite: Invite, opts: JoinOptions = {}): Promise<string> {
   if (invite.kind !== "notion") throw new Error(`joining a ${invite.kind} datasource is not supported yet`);
-  const cfg = invite.config as { databaseId?: string; priorityProperty?: string };
+  const cfg = invite.config as { databaseId?: string; priorityProperty?: string; tokenSecret?: string };
   if (!cfg.databaseId) throw new Error("invite is missing its Notion database id");
 
   const ui = createPrompter();
   try {
     console.log(`\n${B("⚙ faktory join")} ${DIM("— connecting to a shared datasource from an invite")}\n`);
 
-    // 1. Config name → ~/.faktory/<slug>/ (own owner id, distinct from the inviter's)
-    const name = opts.name ?? (await ui.ask("Config name?", "main"));
-    const ref = instanceRef(name);
+    // 1. Config name → ~/.faktory/<slug>/ (own owner id, distinct from the
+    //    inviter's). Refuse to reuse an existing config's name: join always
+    //    creates a fresh link, never clobbers an existing config's source,
+    //    token, or dispatch settings.
+    let ref = instanceRef(opts.name ?? (await ui.ask("Config name?", "main")));
+    while (listInstances().includes(ref.slug)) {
+      console.log(ERR(`  config "${ref.slug}" already exists — choose a different name`));
+      if (opts.name) throw new Error(`config "${ref.slug}" already exists — pass a new --config name to join`);
+      ref = instanceRef(await ui.ask("Config name?", "main"));
+    }
     console.log(DIM(`  → owner id will be ${B(ref.prefix)}, state in ${ref.dir}`));
 
     // 2. Authenticate against the shared datasource: the invite's secret when
@@ -340,8 +347,12 @@ export async function joinFromInvite(invite: Invite, opts: JoinOptions = {}): Pr
 
     ensureInstanceDir(ref);
     const dbh = openDb(ref.dbPath);
-    setSecret(dbh, "notion.token", token);
-    const config = { databaseId: cfg.databaseId, priorityProperty: cfg.priorityProperty };
+    // Preserve the invite's full adapter config verbatim (including a custom
+    // tokenSecret key if the inviter used one) so the link is a faithful copy
+    // of the shared datasource rather than a lossy subset.
+    const secretKey = cfg.tokenSecret ?? "notion.token";
+    setSecret(dbh, secretKey, token);
+    const config = invite.config;
     dbh
       .prepare(
         "INSERT INTO sources (id, kind, config) VALUES ('primary','notion',?) ON CONFLICT(id) DO UPDATE SET kind='notion', config=excluded.config",
@@ -352,7 +363,7 @@ export async function joinFromInvite(invite: Invite, opts: JoinOptions = {}): Pr
     setConfig(dbh, "port", port);
 
     const source = createSource(
-      { id: "primary", kind: "notion", config: config as unknown as Record<string, unknown> },
+      { id: "primary", kind: "notion", config },
       { getSecret: (k) => getSecret(dbh, k), prefix: ref.prefix },
     );
     if (source.ensureProperties) {

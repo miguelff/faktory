@@ -11,6 +11,7 @@ import type { Phase } from "./core/types.ts";
 import { Tui } from "./tui/tui.ts";
 import { createPrompter, joinFromInvite, runSetup } from "./setup.ts";
 import { datasourceIdentity, decodeInvite, encodeInvite } from "./core/invite.ts";
+import { findConfigLinkingDatasource } from "./collab.ts";
 import { bootstrapDetached, bootstrapWorkbench } from "./herdr/bootstrap.ts";
 import { attachSession, ensureSession, sessionClient, sessionSocketPath, waitForSession } from "./herdr/session.ts";
 import { spawn } from "node:child_process";
@@ -458,19 +459,8 @@ async function main() {
       if (!str) throw new Error("usage: faktory join <invite-string>");
       const invite = decodeInvite(str);
       const identity = datasourceIdentity(invite.kind, invite.config);
-      for (const slug of listInstances()) {
-        const db = openDb(instanceRef(slug).dbPath);
-        try {
-          const rows = db.prepare("SELECT kind, config FROM sources").all() as { kind: string; config: string }[];
-          for (const row of rows) {
-            if (datasourceIdentity(row.kind, JSON.parse(row.config)) === identity) {
-              throw new Error(`config "${slug}" already links this datasource (${identity}) — nothing to join`);
-            }
-          }
-        } finally {
-          db.close();
-        }
-      }
+      const existing = findConfigLinkingDatasource(identity);
+      if (existing) throw new Error(`config "${existing}" already links this datasource (${identity}) — nothing to join`);
       const joined = await joinFromInvite(invite, { name: flags.config ?? flags.instance });
       console.log(joined);
       break;
