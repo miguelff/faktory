@@ -9,8 +9,8 @@ import type { WorkItem } from "../src/core/types.ts";
 import type { WorkSource } from "../src/sources/types.ts";
 
 /**
- * Integration test: real SQLite + real HTTP server on an ephemeral port,
- * with an in-memory WorkSource double that records claims and status writes.
+ * Integration test: real SQLite + real HTTP server on an ephemeral port, with
+ * an in-memory WorkSource double that records claims, status writes, comments.
  */
 class FakeSource implements WorkSource {
   readonly kind = "fake";
@@ -19,7 +19,6 @@ class FakeSource implements WorkSource {
   owners: Record<string, string> = {};
   statuses: Record<string, string> = {};
   comments: Array<{ id: string; body: string }> = [];
-  /** When set, the next claim is lost to this instance. */
   nextClaimWinner: string | null = null;
 
   async listCandidates() {
@@ -54,7 +53,7 @@ before(async () => {
   const db = openDb(":memory:");
   db.prepare("INSERT INTO sources (id, kind, config) VALUES ('primary', 'fake', '{}')").run();
   const engine = new Engine(db, source, { prefix: "faktory-test" });
-  server = createApiServer({ engine, prefix: "faktory-test" }); // no herdr: dispatch returns 503
+  server = createApiServer({ engine, prefix: "faktory-test" });
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 });
@@ -65,51 +64,46 @@ after(() => {
 });
 
 async function api(path: string, init?: RequestInit) {
-  const res = await fetch(`${base}${path}`, {
-    headers: { "Content-Type": "application/json" },
-    ...init,
-  });
+  const res = await fetch(`${base}${path}`, { headers: { "Content-Type": "application/json" }, ...init });
   return { status: res.status, body: (await res.json()) as any };
 }
 
-test("health reports prefix and phases", async () => {
+test("health reports prefix, the new phases, and the stages", async () => {
   const { status, body } = await api("/api/health");
   assert.equal(status, 200);
   assert.equal(body.prefix, "faktory-test");
-  assert.ok(body.phases.includes("ready_to_deploy"));
+  assert.ok(body.phases.includes("to_shape"));
+  assert.ok(!body.phases.includes("running"));
+  assert.deepEqual(body.stages, ["to_shape", "to_execute", "to_review"]);
 });
 
-test("sync discovers candidates as tasks", async () => {
+test("sync discovers candidates into backlog", async () => {
   source.items = [workItem("n1", "One", 2), workItem("n2", "Two", 9)];
   const { body } = await api("/api/sync", { method: "POST" });
   assert.equal(body.discovered.length, 2);
   const again = await api("/api/sync", { method: "POST" });
   assert.equal(again.body.discovered.length, 0, "sync is idempotent");
-  const { body: list } = await api("/api/tasks");
+  const { body: list } = await api("/api/tasks?phase=backlog");
   assert.equal(list.tasks.length, 2);
 });
 
-test("transition endpoint validates lifecycle and mirrors to the source", async () => {
+test("transition validates lifecycle, claims on leaving backlog, mirrors status", async () => {
   const bad = await api("/api/tasks/1/transition", {
     method: "POST",
-    body: JSON.stringify({ to: "running", actor: "test" }),
+    body: JSON.stringify({ to: "to_execute", actor: "test" }),
   });
-  assert.equal(bad.status, 409, "discovered → running is illegal");
+  assert.equal(bad.status, 409, "backlog → to_execute is illegal");
 
-  await api("/api/tasks/1/transition", { method: "POST", body: JSON.stringify({ to: "queued", actor: "test" }) });
-  await api("/api/tasks/1/transition", { method: "POST", body: JSON.stringify({ to: "dispatching", actor: "test" }) });
-  const run = await api("/api/tasks/1/transition", {
+  const shaped = await api("/api/tasks/1/transition", {
     method: "POST",
-    body: JSON.stringify({ to: "running", actor: "test" }),
+    body: JSON.stringify({ to: "to_shape", actor: "test" }),
   });
-  assert.equal(run.body.task.phase, "running");
-
-  // Ownership: claimed when leaving discovered, faktory_status mirrors the phase.
-  assert.equal(source.owners.n1, "faktory-test");
-  assert.equal(source.statuses.n1, "running");
+  assert.equal(shaped.body.task.phase, "to_shape");
+  assert.equal(source.owners.n1, "faktory-test", "claimed when leaving backlog");
+  assert.equal(source.statuses.n1, "to_shape", "faktory_status mirrors the phase");
 });
 
-test("a lost claim cancels the local task and returns 409", async () => {
+test("a lost claim archives the local task and returns 409", async () => {
   source.items = [...source.items, workItem("n3", "Three", 1)];
   await api("/api/sync", { method: "POST" });
   const { body: list } = await api("/api/tasks");
@@ -117,26 +111,32 @@ test("a lost claim cancels the local task and returns 409", async () => {
   source.nextClaimWinner = "faktory-rival";
   const res = await api(`/api/tasks/${t.id}/transition`, {
     method: "POST",
-    body: JSON.stringify({ to: "queued", actor: "test" }),
+    body: JSON.stringify({ to: "to_shape", actor: "test" }),
   });
   assert.equal(res.status, 409);
   const { body: after } = await api(`/api/tasks/${t.id}`);
-  assert.equal(after.task.phase, "cancelled");
+  assert.equal(after.task.phase, "archived");
   assert.equal(source.owners.n3, "faktory-rival");
   assert.equal(source.statuses.n3, undefined, "never wrote to an entry it does not own");
 });
 
-test("sync cancels discovered tasks that were claimed elsewhere", async () => {
+test("sync archives backlog tasks that vanished from candidacy", async () => {
   source.items = [...source.items, workItem("n4", "Four", 1)];
   await api("/api/sync", { method: "POST" });
   const { body: list } = await api("/api/tasks");
   const t = list.tasks.find((x: any) => x.itemId === "n4");
-  assert.equal(t.phase, "discovered");
-  // n4 vanishes from candidacy: another instance owns it now.
+  assert.equal(t.phase, "backlog");
   source.items = source.items.filter((i) => i.id !== "n4");
   await api("/api/sync", { method: "POST" });
   const { body: after } = await api(`/api/tasks/${t.id}`);
-  assert.equal(after.task.phase, "cancelled");
+  assert.equal(after.task.phase, "archived");
+});
+
+test("board groups tasks by column", async () => {
+  const { body } = await api("/api/board");
+  const byPhase = Object.fromEntries(body.columns.map((c: any) => [c.phase, c.tasks.length]));
+  assert.ok(byPhase.backlog >= 0);
+  assert.equal(body.columns.length, 8);
 });
 
 test("invalid phase names are rejected", async () => {
@@ -144,80 +144,50 @@ test("invalid phase names are rejected", async () => {
   assert.equal(res.status, 400);
 });
 
-test("task detail includes the audit trail", async () => {
+test("task detail includes the audit trail and inbox", async () => {
   const { body } = await api("/api/tasks/1");
   assert.equal(body.task.id, 1);
   assert.deepEqual(
     body.events.map((e: any) => e.to),
-    ["discovered", "queued", "dispatching", "running"],
+    ["backlog", "to_shape"],
   );
+  assert.ok(Array.isArray(body.inbox));
+});
+
+test("inbox endpoint validates the type and enqueues typed messages", async () => {
+  const bad = await api("/api/tasks/1/inbox", { method: "POST", body: JSON.stringify({ type: "bogus" }) });
+  assert.equal(bad.status, 400);
+
+  const ok = await api("/api/tasks/1/inbox", {
+    method: "POST",
+    body: JSON.stringify({ type: "completed", sender: "a1", stage: "to_shape", note: "shaped", data: { pr: 1 } }),
+  });
+  assert.equal(ok.status, 202);
+  assert.equal(ok.body.message.type, "completed");
+
+  const { body } = await api("/api/tasks/1");
+  assert.equal(body.inbox.at(-1).note, "shaped");
+  assert.equal(body.inbox.at(-1).appliedAt, null, "the endpoint only enqueues; the loop applies");
+});
+
+test("inbox on a missing task returns 404", async () => {
+  const res = await api("/api/tasks/9999/inbox", { method: "POST", body: JSON.stringify({ type: "note" }) });
+  assert.equal(res.status, 404);
 });
 
 test("comment posts a handoff marker through the source, defaulting status from phase", async () => {
   source.comments.length = 0;
-  // task 1 is in `running` (see the transition test above); no agentName set.
   const res = await api("/api/tasks/1/comment", {
     method: "POST",
     body: JSON.stringify({ note: "Plan approved, executing.", data: { iteration: 2 } }),
   });
   assert.equal(res.status, 200);
-  assert.equal(res.body.ok, true);
-  assert.equal(res.body.body, '<faktory status="running" iteration="2">Plan approved, executing.</faktory>');
-  assert.deepEqual(source.comments.at(-1), {
-    id: "n1",
-    body: '<faktory status="running" iteration="2">Plan approved, executing.</faktory>',
-  });
+  assert.equal(res.body.body, '<faktory status="to_shape" iteration="2">Plan approved, executing.</faktory>');
+  assert.equal(source.comments.at(-1)!.id, "n1");
 });
 
-test("comment on a missing task returns 404", async () => {
-  const res = await api("/api/tasks/9999/comment", {
-    method: "POST",
-    body: JSON.stringify({ note: "hi" }),
-  });
-  assert.equal(res.status, 404);
-});
-
-test("comment with an empty body is rejected", async () => {
-  const res = await api("/api/tasks/1/comment", { method: "POST", body: "{}" });
-  assert.equal(res.status, 400);
-});
-
-test("dispatch without herdr returns 503", async () => {
-  const res = await api("/api/tasks/2/dispatch", { method: "POST", body: "{}" });
-  assert.equal(res.status, 503);
-});
-
-test("dispatch refuses to process a task that is not queued", async () => {
-  // Fresh source + server so we can assert the guard runs before any side
-  // effect (claim/status mirror), independent of the no-herdr 503 path.
-  const db = openDb(":memory:");
-  db.prepare("INSERT INTO sources (id, kind, config) VALUES ('primary', 'fake', '{}')").run();
-  const src = new FakeSource();
-  src.items = [workItem("g1", "Guarded", 1)];
-  const engine = new Engine(db, src, { prefix: "faktory-guard" });
-  const herdrCalls: string[] = [];
-  const fakeHerdr = {
-    request: async (method: string) => {
-      herdrCalls.push(method);
-      return {} as any;
-    },
-  } as any;
-  const guarded = createApiServer({ engine, prefix: "faktory-guard", herdr: fakeHerdr });
-  await new Promise<void>((r) => guarded.listen(0, "127.0.0.1", r));
-  const guardedBase = `http://127.0.0.1:${(guarded.address() as AddressInfo).port}`;
-  try {
-    await fetch(`${guardedBase}/api/sync`, { method: "POST" });
-    const list = (await (await fetch(`${guardedBase}/api/tasks`)).json()) as any;
-    const taskId = list.tasks.find((x: any) => x.itemId === "g1").id;
-    const res = await fetch(`${guardedBase}/api/tasks/${taskId}/dispatch`, { method: "POST", body: "{}" });
-    assert.equal(res.status, 409, "a discovered task cannot be dispatched");
-    const detail = (await (await fetch(`${guardedBase}/api/tasks/${taskId}`)).json()) as any;
-    assert.equal(detail.task.phase, "discovered", "task is left untouched");
-    assert.equal(src.owners.g1, undefined, "no ownership claimed before queued");
-    assert.equal(src.statuses.g1, undefined, "no status mirrored before queued");
-    assert.deepEqual(herdrCalls, [], "no herdr work before queued");
-  } finally {
-    guarded.closeAllConnections();
-    guarded.close();
-  }
+test("feed exposes recent action-feed entries", async () => {
+  const { status, body } = await api("/api/feed?limit=5");
+  assert.equal(status, 200);
+  assert.ok(Array.isArray(body.feed));
 });

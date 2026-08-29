@@ -21,10 +21,10 @@ const item: WorkItem = {
   updatedAt: null,
 };
 
-test("upsert discovers once, refreshes afterwards", () => {
+test("upsert discovers once (into backlog), refreshes afterwards", () => {
   const store = makeStore();
   const a = store.upsertFromItem("s1", item);
-  assert.equal(a.phase, "discovered");
+  assert.equal(a.phase, "backlog");
   const b = store.upsertFromItem("s1", { ...item, title: "Fix it better", priority: 9 });
   assert.equal(b.id, a.id);
   assert.equal(b.title, "Fix it better");
@@ -35,20 +35,65 @@ test("upsert discovers once, refreshes afterwards", () => {
 test("transition enforces the lifecycle and records events", () => {
   const store = makeStore();
   const t = store.upsertFromItem("s1", item);
-  store.transition(t.id, "queued", "test");
-  assert.throws(() => store.transition(t.id, "running", "test"), /illegal transition/);
-  store.transition(t.id, "dispatching", "test", { patch: { branch: "faktory-x/1-fix" } });
+  store.transition(t.id, "to_shape", "test");
+  assert.throws(() => store.transition(t.id, "ready", "test"), /illegal transition/);
+  store.transition(t.id, "to_execute", "test", { patch: { branch: "faktory-x/1-fix" } });
   const now = store.byId(t.id)!;
-  assert.equal(now.phase, "dispatching");
+  assert.equal(now.phase, "to_execute");
   assert.equal(now.branch, "faktory-x/1-fix");
-  const events = store.events(t.id);
-  assert.deepEqual(events.map((e) => e.to), ["discovered", "queued", "dispatching"]);
+  assert.deepEqual(
+    store.events(t.id).map((e) => e.to),
+    ["backlog", "to_shape", "to_execute"],
+  );
+});
+
+test("patch can clear a field (agent detaches when a stage finishes)", () => {
+  const store = makeStore();
+  const t = store.upsertFromItem("s1", item);
+  store.transition(t.id, "to_shape", "test", { patch: { agentName: "a-1", stage: "to_shape" } });
+  assert.equal(store.byId(t.id)!.agentName, "a-1");
+  store.transition(t.id, "to_execute", "test", { patch: { agentName: null, stage: null } });
+  const now = store.byId(t.id)!;
+  assert.equal(now.agentName, null);
+  assert.equal(now.stage, null);
+});
+
+test("update patches herdr coordinates without a phase change or event", () => {
+  const store = makeStore();
+  const t = store.upsertFromItem("s1", item);
+  store.transition(t.id, "to_shape", "test");
+  store.update(t.id, { workspaceId: "ws1", paneId: "p1", agentName: "a1", stage: "to_shape" });
+  const now = store.byId(t.id)!;
+  assert.equal(now.phase, "to_shape");
+  assert.equal(now.workspaceId, "ws1");
+  assert.equal(now.agentName, "a1");
+  assert.deepEqual(
+    store.events(t.id).map((e) => e.to),
+    ["backlog", "to_shape"],
+    "update() records no audit event",
+  );
+});
+
+test("stage tabs are recorded per task/stage", () => {
+  const store = makeStore();
+  const t = store.upsertFromItem("s1", item);
+  store.recordStage(t.id, "to_shape", { paneId: "p1", agentName: "a1" });
+  store.recordStage(t.id, "to_execute", { paneId: "p2", agentName: "a2" });
+  store.recordStage(t.id, "to_shape", { paneId: "p1b" }); // upsert keeps agent, updates pane
+  const stages = store.stagesFor(t.id);
+  assert.equal(stages.length, 2);
+  const shape = stages.find((s) => s.stage === "to_shape")!;
+  assert.equal(shape.paneId, "p1b");
+  assert.equal(shape.agentName, "a1");
+  // byAgent resolves the task from its *current* stage agent (inbox origin check).
+  store.update(t.id, { agentName: "a2" });
+  assert.equal(store.byAgent("a2")?.id, t.id);
+  assert.equal(store.byAgent("nobody"), null);
 });
 
 test("force transition bypasses validation but is audited", () => {
   const store = makeStore();
   const t = store.upsertFromItem("s1", item);
   store.transition(t.id, "done", "repair", { force: true, note: "manual repair" });
-  const events = store.events(t.id);
-  assert.match(events.at(-1)!.note!, /^\[forced\] manual repair$/);
+  assert.match(store.events(t.id).at(-1)!.note!, /^\[forced\] manual repair$/);
 });

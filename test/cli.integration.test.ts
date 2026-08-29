@@ -30,7 +30,7 @@ async function faktory(args: string[]): Promise<{ code: number; stdout: string; 
 
 // The registry is the spec: every user-facing top-level command must be
 // discoverable from bare `faktory`. Update this list when you add one.
-const TOP_LEVEL = ["serve", "setup", "config", "source", "sync", "tasks", "transition", "tui", "orchestrate", "invite", "join"];
+const TOP_LEVEL = ["serve", "setup", "config", "source", "sync", "tasks", "transition", "tui", "report", "invite", "join"];
 
 test("no arguments prints subcommands and options on stdout, exit 0", async () => {
   const res = await faktory([]);
@@ -93,11 +93,11 @@ test("unknown config subcommand errors clearly instead of a stray-arg message", 
 
 test("the internal serve bootstrap string herdr detection relies on is preserved", () => {
   // herdr runs this bin string, which execs src/cli.ts; the resolved process is
-  // what isServeProcess/isTuiProcess match on. Pin both the wording and that the
-  // resolved form is still recognised — a stray change would silently break
+  // what isServeProcess/isBoardProcess match on. Pin both the wording and that
+  // the resolved form is still recognised — a stray change would silently break
   // session bootstrap with no other failing test.
-  const { serveCommand } = detachedWorkbench("omnia", 4600, "pi");
-  assert.match(serveCommand, /\bserve omnia --no-tui --no-agent --port 4600$/);
+  const { serveCommand } = detachedWorkbench("omnia", 4600);
+  assert.match(serveCommand, /\bserve omnia --no-board --port 4600$/);
   const resolved = `node /repo/node_modules/.bin/tsx /repo/src/cli.ts ${serveCommand.split("faktory ")[1]}`;
   assert.ok(isServeProcess(resolved), "resolved serve command must be recognised by isServeProcess");
 });
