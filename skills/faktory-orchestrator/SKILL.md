@@ -8,7 +8,8 @@ description: Drive a Faktory instance as its orchestrator agent — claim issues
 You are the policy brain of a Faktory instance. Faktory (the engine) does the
 bookkeeping; you make the judgement calls. You talk to it over its HTTP API
 (default `http://127.0.0.1:4600`, see `docs/API.md`) and to herdr with the
-`herdr` CLI.
+`herdr` CLI. This skill is harness-agnostic: whichever agent runs it (pi,
+claude, codex, ...) needs only a shell with `curl` and `herdr`.
 
 ## Ground rules
 
@@ -19,28 +20,39 @@ bookkeeping; you make the judgement calls. You talk to it over its HTTP API
 - One agent per task, in its own herdr worktree workspace. Never reuse a pane.
 - Keep concurrency low (default: at most 2 tasks in `running`/`reviewing`).
 
-## Loop
+## Loop — over the task state machine
 
-1. **Sync**: `POST /api/sync`. New candidates arrive as `discovered`.
-2. **Select**: pick the best `discovered` task (highest `priority`, then
-   oldest). Move it to `queued` via `POST /api/tasks/:id/transition`.
-3. **Dispatch**: if a concurrency slot is free, `POST /api/tasks/:id/dispatch`.
-   Faktory creates the worktree, starts the configured agent kind, and prompts
-   `/kickoff <issue-url>`. The task lands in `running`.
-4. **Monitor**: `herdr agent list` and `herdr agent wait <name> --until blocked --until done`.
-   - Agent `blocked` → read why (`herdr agent read <name> --source recent-unwrapped`).
-     If you can answer safely (e.g. plan approval within the issue's stated
-     scope), answer with `herdr agent prompt <name> "<answer>"`. If it is a real
-     decision for a human, transition the task to `blocked` and stop touching it.
-   - Agent `done` → read the outcome. PR opened and ready → transition to
-     `reviewing`, record the PR URL in your notes.
-5. **Review**: when the kickoff loop reports its blind review passed and the PR
-   is ready-for-review, transition `reviewing → ready_to_deploy`. If the review
-   surfaced blockers the agent could not fix, transition to `blocked`.
-6. **Deploy**: only on explicit instruction or configured auto-deploy policy:
-   `ready_to_deploy → deploying`, run the deploy procedure, then `→ done`
-   (or `→ failed` with a note).
-7. Repeat from 1. Report a concise status summary each cycle.
+You run a continuous loop. Each cycle: sync, then walk every task and take the
+action its **phase** demands. The state machine (see `src/core/lifecycle.ts`)
+is the contract; you supply the judgement at each edge.
+
+0. **Sync**: `POST /api/sync`. New candidates arrive as `discovered`.
+   Then `GET /api/tasks` and act per task, by phase:
+
+- **`discovered`** — select the best candidates (highest `priority`, then
+  oldest) and move them to `queued` via `POST /api/tasks/:id/transition`.
+- **`queued`** — if a concurrency slot is free, `POST /api/tasks/:id/dispatch`.
+  Faktory creates the worktree, starts the configured agent kind, and prompts
+  `/kickoff <issue-url>`. The task lands in `running`. Otherwise leave it.
+- **`running`** — monitor the task's agent (`agentName` on the task):
+  `herdr agent list`, `herdr agent wait <name> --until blocked --until done`.
+  - Agent `blocked` → read why (`herdr agent read <name> --source recent-unwrapped`).
+    If you can answer safely (e.g. plan approval within the issue's stated
+    scope), answer with `herdr agent prompt <name> "<answer>"`. If it is a real
+    decision for a human, transition the task to `blocked` and stop touching it.
+  - Agent `done` → read the outcome. PR opened and ready → transition to
+    `reviewing`, record the PR URL in your notes.
+- **`reviewing`** — when the kickoff loop reports its blind review passed and
+  the PR is ready-for-review, transition `reviewing → ready_to_deploy`. If the
+  review surfaced blockers the agent could not fix, transition to `blocked`.
+- **`ready_to_deploy`** — only on explicit instruction or configured
+  auto-deploy policy: `→ deploying`, run the deploy procedure, then `→ done`
+  (or `→ failed` with a note).
+- **`blocked` / `failed`** — surface them in your status summary; never force.
+  Retry a `failed` task (`→ queued`) only once its recorded cause is addressed.
+
+End each cycle with a one-line status summary (counts per phase + what you
+did), pause briefly, and repeat. Never exit the loop unless told to stop.
 
 ## Repair
 
