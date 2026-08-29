@@ -1,7 +1,7 @@
 import type { DatabaseSync } from "node:sqlite";
 import { TaskStore, type TaskPatch } from "./tasks.ts";
 import type { Task, Phase } from "./types.ts";
-import { statusForPhase } from "./lifecycle.ts";
+import { canTransition, phaseForStatus, statusForPhase } from "./lifecycle.ts";
 import { renderHandoff, type Handoff } from "./handoff.ts";
 import { InboxStore } from "./inbox.ts";
 import { FeedStore } from "./feed.ts";
@@ -55,7 +55,11 @@ export class Engine {
     const fresh: Task[] = [];
     for (const item of items) {
       const existing = this.tasks.bySourceItem(this.source.id, item.id);
-      const task = this.tasks.upsertFromItem(this.source.id, item);
+      // The datasource is the source of truth: a task we already own carries its
+      // phase in faktory_status, so a newly-projected row adopts it (recovery
+      // after a wiped local DB). Unowned entries are discoverable → backlog.
+      const initialPhase = item.ownedBy === this.cfg.prefix ? phaseForStatus(item.status) : "backlog";
+      const task = this.tasks.upsertFromItem(this.source.id, item, initialPhase);
       if (!existing) fresh.push(task);
     }
     const seen = new Set(items.map((i) => i.id));
@@ -91,25 +95,29 @@ export class Engine {
   ): Promise<Task> {
     const before = this.tasks.byId(taskId);
     if (!before) throw new Error(`task ${taskId} not found`);
+    // Validate legality up front so an illegal move never reaches the datasource.
+    if (!canTransition(before.phase, to)) {
+      throw new Error(`illegal transition ${before.phase} → ${to} for task ${taskId}`);
+    }
     if (before.phase === "backlog") {
-      // Dropping a backlog task locally touches nothing we don't own.
-      if (to === "archived") return this.recordTransition(taskId, before.phase, to, actor, note, patch);
+      // A backlog entry we never claimed isn't ours to write; drop it locally.
+      if (to === "archived") return this.project(taskId, before.phase, to, actor, note, patch);
       const owner = await this.source.claim(before.itemId);
       if (owner !== this.cfg.prefix) {
-        this.tasks.transition(taskId, "archived", "engine", {
-          force: true,
-          note: `claim lost to ${owner}`,
-        });
+        this.tasks.transition(taskId, "archived", "engine", { force: true, note: `claim lost to ${owner}` });
         this.feed.append({ taskId, kind: "transition", actor: "engine", message: `claim lost to ${owner}` });
         throw new ClaimLostError(taskId, owner);
       }
     }
-    const task = this.recordTransition(taskId, before.phase, to, actor, note, patch);
-    await this.source.setStatus(task.itemId, statusForPhase(task.phase));
-    return task;
+    // Datasource-first: the transition IS the write to faktory_status. Only once
+    // the source of truth has moved do we update the local projection, so the
+    // projection can never get ahead of the datasource (no drift, no sync bug).
+    await this.source.setStatus(before.itemId, statusForPhase(to));
+    return this.project(taskId, before.phase, to, actor, note, patch);
   }
 
-  private recordTransition(
+  /** Update the local projection to reflect a transition already written to the datasource. */
+  private project(
     taskId: number,
     from: Phase,
     to: Phase,
@@ -118,12 +126,7 @@ export class Engine {
     patch?: Partial<TaskPatch>,
   ): Task {
     const task = this.tasks.transition(taskId, to, actor, { note, patch });
-    this.feed.append({
-      taskId,
-      kind: "transition",
-      actor,
-      message: `${from} → ${to}${note ? ` — ${note}` : ""}`,
-    });
+    this.feed.append({ taskId, kind: "transition", actor, message: `${from} → ${to}${note ? ` — ${note}` : ""}` });
     return task;
   }
 

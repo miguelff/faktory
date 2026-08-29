@@ -127,11 +127,24 @@ prefix so instances never collide on one database:
 An entry is discoverable by every instance while `faktory_owned_by` is empty;
 the instance that wins the claim (on leaving `backlog`) manages it from then on.
 
+**The datasource is the source of truth for lifecycle state.** Every transition
+is *datasource-first*: validate legality → claim (CAS) if leaving `backlog` →
+write `faktory_status` to the datasource → only then update the local
+projection. The projection can therefore never get ahead of the datasource, so
+local and remote cannot drift (the class of “syncing problems” simply cannot
+arise). A wiped/rebuilt local DB recovers each owned task's phase by reading
+`faktory_status` back. The SQLite DB below is a **projection + local
+operational store**, never an independent authority for phase.
+
 Each instance keeps its own state under `~/.faktory/<slug>/` (SQLite DB,
 secrets, logs) and runs its own API/TUI on its own port. The remote board is
 Notion itself; there is no built-in web UI.
 
-## SQLite state
+## SQLite state (projection + local operational data)
+
+The datasource owns lifecycle state (phase, ownership); SQLite projects it and
+holds data that is inherently local/per-operator (herdr coordinates, the inbox
+queue, the action feed) or purely a cache for fast TUI/loop reads.
 
 - `config` — key/value app config (source, `wip`, repo path, port…)
 - `sources` — configured work sources (kind + JSON config, secrets by ref)

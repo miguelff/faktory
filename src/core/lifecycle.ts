@@ -64,6 +64,17 @@ export function statusForPhase(phase: Phase): string {
   return phase === "backlog" ? DISCOVERABLE : phase;
 }
 
+/**
+ * Inverse of statusForPhase: the phase a datasource `faktory_status` represents.
+ * The datasource is the source of truth, so this is how the local projection
+ * adopts state read back from it (a discoverable/empty status is `backlog`).
+ * Unknown values fall back to `backlog` rather than corrupting the projection.
+ */
+export function phaseForStatus(status: string | null): Phase {
+  if (!status || status === DISCOVERABLE) return "backlog";
+  return (PHASES as readonly string[]).includes(status) ? (status as Phase) : "backlog";
+}
+
 /** All values faktory_status can take in the source. */
 export const FAKTORY_STATUSES: readonly string[] = [
   DISCOVERABLE,

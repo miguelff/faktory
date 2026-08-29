@@ -30,8 +30,15 @@ function rowToTask(r: Record<string, unknown>): Task {
 export class TaskStore {
   constructor(private readonly db: DatabaseSync) {}
 
-  /** Insert-or-refresh a task from a source candidate. New tasks start `backlog`. */
-  upsertFromItem(sourceId: string, item: WorkItem): Task {
+  /**
+   * Insert-or-refresh a task from a source candidate. A *new* task adopts
+   * `initialPhase` — the phase read back from the datasource (the source of
+   * truth), so a rebuilt/wiped local projection recovers mid-pipeline state
+   * rather than resetting everything to backlog. Existing rows keep their
+   * projected phase (owned tasks only ever move via datasource-first
+   * transitions, so the projection already matches the datasource).
+   */
+  upsertFromItem(sourceId: string, item: WorkItem, initialPhase: Phase = "backlog"): Task {
     const existing = this.bySourceItem(sourceId, item.id);
     if (existing) {
       this.db
@@ -42,12 +49,10 @@ export class TaskStore {
       return this.byId(existing.id)!;
     }
     const res = this.db
-      .prepare(
-        "INSERT INTO tasks (source_id, item_id, title, url, phase, priority) VALUES (?, ?, ?, ?, 'backlog', ?)",
-      )
-      .run(sourceId, item.id, item.title, item.url, item.priority);
+      .prepare("INSERT INTO tasks (source_id, item_id, title, url, phase, priority) VALUES (?, ?, ?, ?, ?, ?)")
+      .run(sourceId, item.id, item.title, item.url, initialPhase, item.priority);
     const task = this.byId(Number(res.lastInsertRowid))!;
-    this.logEvent(task.id, null, "backlog", "engine", "discovered in source");
+    this.logEvent(task.id, null, initialPhase, "engine", "discovered in source");
     return task;
   }
 

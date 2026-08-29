@@ -260,6 +260,35 @@ test("an unsigned state-changing message is rejected", async () => {
   assert.match(engine.inbox.forTask(1).at(-1)!.outcome!, /rejected:origin/);
 });
 
+test("the datasource is authoritative: a transition writes faktory_status before the projection", async () => {
+  const { engine, source, loop } = harness(3);
+  source.items = [item("n1", "One", 5)];
+  await loop.tick();
+  // Make the next datasource write fail: the local projection must NOT advance
+  // ahead of the source of truth.
+  const t = engine.tasks.byId(1)!;
+  const realSet = source.setStatus.bind(source);
+  source.setStatus = async () => {
+    throw new Error("notion down");
+  };
+  await assert.rejects(() => engine.transition(t.id, "blocked", "tui"));
+  assert.equal(engine.tasks.byId(1)!.phase, "to_shape", "projection stayed put when the datasource write failed");
+  source.setStatus = realSet;
+});
+
+test("a rebuilt projection recovers an owned task's phase from the datasource", async () => {
+  const { engine, source, loop } = harness(3);
+  // The datasource already holds an owned, mid-pipeline task (as if the local DB
+  // was wiped): owned by us, faktory_status = to_execute.
+  source.items = [
+    { id: "n1", title: "Recover me", url: "u", status: "to_execute", ownedBy: "faktory-test", ownedAt: "t", priority: 5, updatedAt: null },
+  ];
+  source.owners.n1 = "faktory-test";
+  await loop.tick();
+  const t = engine.tasks.byId(1)!;
+  assert.equal(t.phase, "to_execute", "adopted the datasource phase, not backlog");
+});
+
 test("archiving a task closes its herdr space exactly once", async () => {
   const { engine, source, dispatcher, loop } = harness(3);
   source.items = [item("n1", "One", 5)];
