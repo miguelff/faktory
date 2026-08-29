@@ -142,8 +142,10 @@ bin/faktory config delete omnia              # delete a config + its local state
 bin/faktory config delete omnia --force      # …without the confirmation prompt
 ```
 
-Deleting a config removes its state under `~/.faktory/<slug>/` (SQLite DB and
-secrets); it leaves Notion ownership tags on already-claimed items untouched.
+Deleting a config first tears down its herdr session — stopping the session's
+server kills everything running in it (the serve loop, the board, any stage
+agents) — then removes its state under `~/.faktory/<slug>/` (SQLite DB and
+secrets). Notion ownership tags on already-claimed items are left untouched.
 The `serve` picker can also delete a config when several exist.
 
 - **Notion** is the remote board: `faktory_status` mirrors every phase.

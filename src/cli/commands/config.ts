@@ -2,11 +2,11 @@ import { Command } from "commander";
 import { getConfig, setConfig } from "../../core/db.ts";
 import { createPrompter, runSetup } from "../../setup.ts";
 import {
+  deleteConfig,
   describeConfig,
   instanceRef,
   isYes,
   listInstances,
-  removeInstance,
   requireInstance,
 } from "../context.ts";
 import { Option } from "commander";
@@ -67,7 +67,9 @@ export function registerConfig(program: Command): void {
         const ui = createPrompter();
         let ok = false;
         try {
-          console.log(`Stop any running serve for "${ref.slug}" before deleting \u2014 this removes its SQLite DB and secrets.`);
+          console.log(
+            `Deleting "${ref.slug}" stops its herdr session (serve, board, agents) and removes its SQLite DB and secrets.`,
+          );
           ok = isYes(await ui.ask(`Delete config "${ref.slug}" and all its local state in ${ref.dir}? (y/n)`, "n"));
         } finally {
           ui.close();
@@ -77,7 +79,7 @@ export function registerConfig(program: Command): void {
           return;
         }
       }
-      removeInstance(ref.slug);
+      deleteConfig(ref.slug);
       console.log(`deleted config "${ref.slug}" (${ref.dir})`);
       console.log("note: Notion ownership tags on already-claimed items are left as-is");
     });
