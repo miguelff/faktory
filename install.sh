@@ -33,11 +33,8 @@ say "Installing Faktory dependencies…"
 cd "$(dirname "$0")"
 pnpm install
 
-say "Done. Next steps:"
+say "Done. Next step:"
 cat <<'EOF'
-  1. Authenticate pi against your provider:    pi   (follow the login flow)
-  2. Start herdr and open a pane in this repo: herdr
-  3. Create an instance:                       bin/faktory init <name>
-  4. Configure the Notion source:              bin/faktory source:set-notion --instance <name> --database <id> --token ntn_…
-  5. Serve the board:                          bin/faktory serve --instance <name>
+  bin/faktory        — walks you through setup (Notion auth, backlog database),
+                       then starts everything: herdr session, board, TUI, agent loop
 EOF
