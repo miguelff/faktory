@@ -93,6 +93,19 @@ bin/faktory tasks  --config omnia            # list tasks
 bin/faktory tui    --config omnia            # inspect / repair in the terminal
 ```
 
+Manage the configs themselves (CRUD):
+
+```sh
+bin/faktory config list                      # list configs (prefix, port, backlog db)
+bin/faktory config create [name]             # create one (runs the setup wizard)
+bin/faktory config delete omnia              # delete a config + its local state (asks first)
+bin/faktory config delete omnia --force      # …without the confirmation prompt
+```
+
+Deleting a config removes its state under `~/.faktory/<slug>/` (SQLite DB and
+secrets); it leaves Notion ownership tags on already-claimed items untouched.
+The `serve` picker can also delete a config when several exist.
+
 - **Web board**: http://127.0.0.1:4600 — sync, queue, dispatch, watch phases.
 - **HTTP API**: `docs/API.md` — same control plane, used by orchestrator agents.
 - **TUI**: j/k navigate, enter for detail + audit history, `t` to transition,

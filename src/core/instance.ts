@@ -1,4 +1,4 @@
-import { mkdirSync, readdirSync, existsSync } from "node:fs";
+import { mkdirSync, readdirSync, existsSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -49,4 +49,18 @@ export function listInstances(): string[] {
     .filter((e) => e.isDirectory() && existsSync(join(home, e.name, "faktory.sqlite")))
     .map((e) => e.name)
     .sort();
+}
+
+/**
+ * Delete a config's entire local state directory (SQLite DB + secrets). Returns
+ * false when no such config exists, so callers can report an unknown-config
+ * error instead of silently succeeding. Notion-side ownership tags on already
+ * claimed items are intentionally left untouched — this only removes the local
+ * orchestration state under ~/.faktory/<slug>/.
+ */
+export function removeInstance(name: string): boolean {
+  const ref = instanceRef(name);
+  if (!existsSync(ref.dbPath)) return false;
+  rmSync(ref.dir, { recursive: true, force: true });
+  return true;
 }
