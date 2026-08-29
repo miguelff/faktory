@@ -4,7 +4,7 @@ Local orchestration for coding agents. Faktory watches an issue backlog
 (Notion today; Jira/GitHub behind the same abstraction), dispatches issues to
 coding agents running inside [herdr](https://herdr.dev) via `/kickoff`, tracks
 the whole lifecycle (dispatch → execution → review → deploy) in SQLite, and
-mirrors progress back to the source with tags and statuses.
+mirrors progress back to the source through faktory-managed ownership columns.
 
 Read `docs/DESIGN.md` for the architecture and `AGENTS.md` if you are an agent
 evolving this codebase.
@@ -22,29 +22,37 @@ Already have node ≥ 24 and herdr? Just `pnpm install`.
 
 ## Configure
 
-Faktory is organized in **instances** — independent orchestrations with their
-own state, port, and tag prefix (`faktory-<slug>`). Create one and point it at
-a Notion database:
+Faktory is organized in **configs** — independent orchestrations, each with its
+own state database, secrets, port, and owner id (`faktory-<slug>`) under
+`~/.faktory/<slug>/`. You normally never configure anything by hand: the first
+`bin/faktory serve` walks you through a terminal wizard — authenticate with
+Notion (OAuth in the browser when
+`FAKTORY_NOTION_CLIENT_ID`/`FAKTORY_NOTION_CLIENT_SECRET` are set, otherwise an
+integration token), then pick the backlog database **or let faktory create
+one**, then repo/harness/port defaults. Re-run the wizard any time with
+`bin/faktory setup`.
+
+Scripted setup is still available:
 
 ```sh
-bin/faktory init omnia
 bin/faktory source:set-notion \
-  --instance omnia \
+  --config omnia \
   --database 328433c39871805dace6eae8987ce6c3 \
-  --candidate-property Tags \
-  --candidate-value "faktory-omnia-execute" \
-  --status-property Status \
   --priority-property Priority \
   --token ntn_xxx            # or NOTION_TOKEN env var
 ```
 
-Candidacy is a *property + value* filter: any page whose `Tags` contains
-`faktory-omnia-execute` becomes a Faktory task. Lifecycle mirrors are written
-back as `faktory-omnia-processing`, `-stalled`, `-failed`, `-executed`,
-`-review-passed`. Share the database with your Notion integration or the API
-returns 404.
+**Ownership model.** Faktory manages three columns on the database — added
+automatically if missing: `faktory_status` (select), `faktory_owned_by`
+(rich text), and `faktory_owned_at` (date). Every entry is *discoverable* by
+every faktory instance consuming the database; an instance **owns** an entry
+the moment it moves it away from discoverable, stamping `faktory_owned_by` +
+`faktory_owned_at` via compare-and-swap — a lost race cancels the local task.
+Only the owner manages the entry from then on, mirroring its lifecycle phase
+into `faktory_status`. Share the database with your Notion integration or the
+API returns 404.
 
-Optional per-instance settings (stored in the instance DB):
+Optional per-config settings (stored in the config's state DB):
 
 ```sh
 # where /kickoff worktrees are created from, and which agent runs them
@@ -53,21 +61,36 @@ bin/faktory transition --help   # see CLI usage
 
 ## Run
 
-**One command** (from a plain terminal, not inside herdr) — opens a new
-terminal window with a dedicated herdr session and Faktory running inside it:
+**One command** — Faktory spawns herdr, not the other way around:
 
 ```sh
-scripts/faktory-up.sh            # session "faktory", instance "fk"
-scripts/faktory-up.sh work main  # custom session + instance
+bin/faktory serve              # picks the only config, or asks; wizard on first run
+bin/faktory serve omnia        # a specific config (equivalent: --config omnia)
 ```
 
-Or manually:
+`serve` first makes sure a config exists (running the setup wizard if not, or
+letting you pick when several exist), then checks/installs external
+dependencies, starts the web board + API in-process, and bootstraps the whole
+workbench. From a plain terminal it opens a new terminal window attached to a
+herdr session **dedicated to that config** (`faktory-<slug>`, isolated from
+every other config's session; `--session`/`herdrSession` config to change)
+and sets up a `faktory:<instance>` workspace there; from
+inside a herdr pane it splits the panes around itself. Either way you get a
+TUI pane and an **orchestrator agent loop** — an agent (configurable harness,
+`orchestratorKind` config, pi by default) that follows
+`skills/faktory-orchestrator/SKILL.md` and continuously loops over the task
+state machine: sync → queue discovered → dispatch queued → monitor running →
+judge reviews. Re-running `serve` against a live session preserves panes and
+restarts the loop only if its agent died. Opt out with `--headless`,
+`--no-tui`, or `--no-agent`; `bin/faktory orchestrate` (re)starts just the
+agent loop.
+
+Other commands:
 
 ```sh
-bin/faktory sync   --instance omnia          # pull candidates into the task table
-bin/faktory tasks  --instance omnia          # list tasks
-bin/faktory serve  --instance omnia --port 4600 --repo-cwd ~/GitHub/useomnia/omnia --agent-kind pi
-bin/faktory tui    --instance omnia          # inspect / repair in the terminal
+bin/faktory sync   --config omnia            # pull candidates into the task table
+bin/faktory tasks  --config omnia            # list tasks
+bin/faktory tui    --config omnia            # inspect / repair in the terminal
 ```
 
 - **Web board**: http://127.0.0.1:4600 — sync, queue, dispatch, watch phases.
@@ -97,7 +120,7 @@ pnpm test        # unit + integration (fake Notion API, fake herdr socket, real 
 ```
 
 Integration coverage: Notion adapter against a fake Notion server (pagination,
-filters, tag read-modify-write), the HTTP API against a real server on an
+filters, claim CAS, status mirroring), the HTTP API against a real server on an
 ephemeral port with a fake source (lifecycle + source mirroring), and the herdr
 client against a fake unix-socket server (round trips, errors, event streams).
 
