@@ -201,12 +201,13 @@ export class Loop {
         this.forget(task.agentName);
         continue;
       }
-      // idle | done | unknown = quiet. This is NOT completion (never inferred
-      // from silence) and NOT necessarily a stall: an actionable lane like
-      // to_shape is a live human conversation where the agent legitimately
-      // sits idle waiting for a reply. So we nudge once, then only *flag* it in
-      // the feed for human attention after a timeout — we never tear down a
-      // possibly-active session. A real completion arrives via the inbox.
+      // Quiet (no completion — never inferred from silence). Two flavours:
+      //  - `idle`: possibly a live conversation (a to_shape agent legitimately
+      //    sits idle waiting for the human). Nudge once, then only *flag* it —
+      //    never tear down a possibly-active session.
+      //  - `done`/`unknown`: the agent process ended (or is unrecognisable)
+      //    without reporting. Nudge once, then reclaim the lane (→ blocked)
+      //    after the timeout, or its WIP slot leaks forever.
       const first = this.quietSince.get(task.agentName) ?? this.now();
       this.quietSince.set(task.agentName, first);
       if (!this.nudged.has(task.agentName)) {
@@ -218,14 +219,21 @@ export class Loop {
         this.engine.feed.append({ taskId: task.id, kind: "stall", actor: "engine", message: `nudged ${task.agentName} to report` });
         continue;
       }
-      if (this.now() - first >= this.cfg.stallTimeoutMs && !this.warned.has(task.agentName)) {
-        this.warned.add(task.agentName);
-        this.engine.feed.append({
-          taskId: task.id,
-          kind: "stall",
-          actor: "engine",
-          message: `${task.agentName} has been quiet without reporting — may need attention (check its tab)`,
-        });
+      if (this.now() - first < this.cfg.stallTimeoutMs) continue;
+      if (status === "idle") {
+        if (!this.warned.has(task.agentName)) {
+          this.warned.add(task.agentName);
+          this.engine.feed.append({
+            taskId: task.id,
+            kind: "stall",
+            actor: "engine",
+            message: `${task.agentName} has been quiet without reporting — may need attention (check its tab)`,
+          });
+        }
+      } else {
+        // done | unknown: ended without reporting — reclaim the lane.
+        await this.block(task, `stalled: ${task.agentName} ended without reporting`);
+        this.forget(task.agentName);
       }
     }
   }
