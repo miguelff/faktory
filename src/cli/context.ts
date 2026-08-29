@@ -169,7 +169,7 @@ export function sessionNameFor(slug: string): string {
   return `faktory-${slug}`;
 }
 
-/** Detached workbench: serve, tui, and the agent loop each in their own pane. */
+/** Detached workbench: serve, tui, and the agent loop each in their own named tab. */
 export function detachedWorkbench(slug: string, port: number, orchestratorKind: string) {
   return {
     instance: slug,
@@ -185,8 +185,8 @@ export function detachedWorkbench(slug: string, port: number, orchestratorKind: 
 }
 
 /**
- * Launcher mode: make sure the workbench runs INSIDE the session (serve pane,
- * TUI pane, agent-loop pane), then attach the current terminal to it. When the
+ * Launcher mode: make sure the workbench runs INSIDE the session (serve tab,
+ * TUI tab, agent-loop tab), then attach the current terminal to it. When the
  * session server isn't up yet, attaching starts it and a detached provisioner
  * sets the panes up as soon as the socket answers.
  */
@@ -200,7 +200,7 @@ export async function launchAndAttach(
   if (client) {
     process.env.HERDR_SOCKET_PATH = sessionSocketPath(sessionName);
     const result = await bootstrapDetached(client, detachedWorkbench(slug, port, orchestratorKind));
-    if (result.servePaneId) console.log(`serve pane ${result.servePaneId}`);
+    if (result.servePaneId) console.log(`serve tab (pane ${result.servePaneId})`);
     if (result.agentName && !result.agentAlreadyRunning) console.log(`orchestrator ${result.agentName} starting`);
   } else {
     spawn(FAKTORY_BIN, ["__provision", slug, "--session", sessionName, "--port", String(port)], {

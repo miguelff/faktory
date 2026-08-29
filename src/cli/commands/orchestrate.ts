@@ -43,7 +43,7 @@ export function registerOrchestrate(program: Command): void {
     console.log(
       result.agentAlreadyRunning
         ? `orchestrator ${result.agentName} already running`
-        : `orchestrator ${result.agentName} (${orchestratorKind}) started in pane ${result.agentPaneId} against http://127.0.0.1:${port}`,
+        : `orchestrator ${result.agentName} (${orchestratorKind}) started in its own tab (pane ${result.agentPaneId}) against http://127.0.0.1:${port}`,
     );
   });
 }

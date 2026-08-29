@@ -132,17 +132,18 @@ async function runServe(configArg: string | undefined, opts: ServeOpts): Promise
         faktoryBin: FAKTORY_BIN,
         agentKind: orchestratorKind,
         fromPaneId,
+        serveTab: true,
         tui: opts.tui,
         agent: opts.agent,
       });
       if (result.alreadyBootstrapped)
-        console.log(`workspace ${result.workspaceId} already bootstrapped — panes preserved`);
-      if (result.tuiPaneId) console.log(`tui pane ${result.tuiPaneId}`);
+        console.log(`workspace ${result.workspaceId} already bootstrapped — tabs preserved`);
+      if (result.tuiPaneId) console.log(`tui tab (pane ${result.tuiPaneId})`);
       if (result.agentName)
         console.log(
           result.agentAlreadyRunning
             ? `orchestrator ${result.agentName} already running`
-            : `orchestrator ${result.agentName} (${orchestratorKind}) started in pane ${result.agentPaneId}`,
+            : `orchestrator ${result.agentName} (${orchestratorKind}) started in its own tab (pane ${result.agentPaneId})`,
         );
     } catch (e) {
       console.warn(`warning: workbench bootstrap failed: ${(e as Error).message}`);
