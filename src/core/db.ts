@@ -64,7 +64,7 @@ const MIGRATIONS: string[] = [
   -- owned by another instance, or already be done and filtered out of
   -- candidacy — in all of those cases there may be no local task row yet.
   CREATE TABLE task_dependencies (
-    task_id            INTEGER NOT NULL REFERENCES tasks(id),
+    task_id            INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
     depends_on_item_id TEXT NOT NULL,
     PRIMARY KEY (task_id, depends_on_item_id)
   );

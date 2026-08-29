@@ -76,7 +76,8 @@ modelled abstractly on `WorkItem.dependsOn` (a flat list of source-native ids);
 each adapter maps its own relation to it (Notion: a self-referential relation
 property `faktory_depends_on`; GitHub/Jira later: issue references / links).
 The engine persists the edges (`task_dependencies`, keyed by the dependency's
-source item id) on every sync and gates the `discovered → queued` transition:
+source item id) on every sync and gates every transition **into `queued`**
+(promotion from `discovered`, or revival of a `failed`/`cancelled` task):
 a dependency is *satisfied* only once it is `done` — proven by a local task in
 phase `done` **or** the source reporting its `faktory_status = done` (so
 dependencies owned by another instance, or already done and filtered out of

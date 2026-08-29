@@ -2,7 +2,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { TaskStore } from "./tasks.ts";
 import type { Task } from "./types.ts";
 import type { Phase } from "./types.ts";
-import { statusForPhase } from "./lifecycle.ts";
+import { canTransition, statusForPhase } from "./lifecycle.ts";
 import { renderHandoff, type Handoff } from "./handoff.ts";
 import type { WorkSource } from "../sources/types.ts";
 
@@ -120,23 +120,27 @@ export class Engine {
   }
 
   /**
-   * Transition a task and mirror faktory_status to the source. Promoting a
-   * `discovered` task to `queued` is gated on its "depends-on" edges so work
-   * is tackled in order; unmet dependencies throw DependenciesUnmetError
-   * before anything is claimed. Leaving `discovered` otherwise claims
-   * ownership (CAS); a lost claim cancels the local task and throws
-   * ClaimLostError.
+   * Transition a task and mirror faktory_status to the source. Moving into
+   * `queued` (from `discovered`, or when reviving a `failed`/`cancelled` task)
+   * is gated on its "depends-on" edges so work is tackled in order; unmet
+   * dependencies throw DependenciesUnmetError before anything is claimed.
+   * Leaving `discovered` otherwise claims ownership (CAS); a lost claim
+   * cancels the local task and throws ClaimLostError.
    */
   async transition(taskId: number, to: Phase, actor: string, note?: string): Promise<Task> {
     const before = this.tasks.byId(taskId);
     if (!before) throw new Error(`task ${taskId} not found`);
+    // Ordering gate: never let a task be queued while a dependency is unmet.
+    // Guarded by canTransition so an otherwise-illegal move (e.g. running →
+    // queued) still fails as an illegal transition rather than reporting
+    // spurious blockers, and so we skip the dependency I/O for illegal moves.
+    if (to === "queued" && canTransition(before.phase, "queued")) {
+      const blockers = (await this.dependencies(taskId)).filter((d) => !d.satisfied);
+      if (blockers.length) throw new DependenciesUnmetError(taskId, blockers);
+    }
     if (before.phase === "discovered") {
       // Dropping a discovered task locally touches nothing we don't own.
       if (to === "cancelled") return this.tasks.transition(taskId, to, actor, { note });
-      if (to === "queued") {
-        const blockers = (await this.dependencies(taskId)).filter((d) => !d.satisfied);
-        if (blockers.length) throw new DependenciesUnmetError(taskId, blockers);
-      }
       const owner = await this.source.claim(before.itemId);
       if (owner !== this.cfg.prefix) {
         this.tasks.transition(taskId, "cancelled", "engine", {

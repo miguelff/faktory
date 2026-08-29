@@ -97,6 +97,33 @@ test("queueing is blocked until the dependency is done", async () => {
   assert.equal(queued.phase, "queued");
 });
 
+test("reviving a cancelled task is gated on dependencies too", async () => {
+  const { engine, source } = setup();
+  source.set(item("a"));
+  source.set(item("b", ["a"]));
+  await engine.syncCandidates();
+  const b = engine.tasks.bySourceItem("primary", "b")!;
+  // Cancel b while still discovered (nothing owned), then try to revive it.
+  await engine.transition(b.id, "cancelled", "test");
+  await assert.rejects(
+    () => engine.transition(b.id, "queued", "test"),
+    (e) => e instanceof DependenciesUnmetError,
+  );
+  assert.equal(engine.tasks.byId(b.id)!.phase, "cancelled");
+});
+
+test("an illegal move into queued fails as illegal, not as unmet deps", async () => {
+  const { engine, source } = setup();
+  source.set(item("a"));
+  source.set(item("b", ["a"]));
+  await engine.syncCandidates();
+  const b = engine.tasks.bySourceItem("primary", "b")!;
+  // Force b into `running` (dispatching has no depends-on gate); running →
+  // queued is not a legal transition, so it must report that, not blockers.
+  engine.tasks.transition(b.id, "running", "test", { force: true });
+  await assert.rejects(() => engine.transition(b.id, "queued", "test"), /illegal transition/);
+});
+
 test("dependencies without deps queue freely", async () => {
   const { engine, source } = setup();
   source.set(item("a"));
