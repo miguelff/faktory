@@ -48,8 +48,16 @@ broad) so duplicate-join detection keeps working.
   HTTP code. External systems are reached through interfaces (`WorkSource`,
   the herdr client) and wired via factories (`src/sources/factory.ts`).
 - **Lifecycle is data.** Legal phase transitions live in `src/core/lifecycle.ts`
-  as a table, and every transition goes through `transition()` so it is
+  as a table, and every transition goes through `Engine.transition()` so it is
   validated and recorded in `task_events`. Never mutate `tasks.phase` directly.
+- **The datasource is the source of truth, not the database.** Lifecycle state
+  (`faktory_status`) and ownership (`faktory_owned_by`) live in the shared
+  datasource; the SQLite `tasks` table is only a *reconciled projection* (see
+  `src/core/tasks.ts`) plus local-only execution coordinates. The engine reads
+  the phase back from the source before validating a move (`phaseForStatus`),
+  mirrors every committed move to the source, and only then records the
+  projection. `sync` reconciles the cache from the datasource; a wiped DB
+  rebuilds from it. Never treat a cached phase as authoritative.
 - **Adding a work source** = implement `WorkSource` in `src/sources/<kind>.ts`,
   register it in the factory, add mapping unit tests + an integration test with
   a fake HTTP server. Do not touch the engine.

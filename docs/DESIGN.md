@@ -9,7 +9,7 @@ itself, and manages herdr workspaces/panes/agents through herdr's socket API.
 ┌──────────────────────────────────────────────────────────────────────┐
 │  Work sources (abstract)         Faktory (deterministic engine)        │
 │  ┌───────────┐                   ┌───────────────────────────────┐     │
-│  │  Notion   │  listCandidates   │  SQLite  (config + state)      │     │
+│  │  Notion   │  listCandidates   │  SQLite (config + projection)  │     │
 │  │  (Jira)   │◀─────────────────▶│  Lifecycle state machine       │     │
 │  │  (GitHub) │  setStatus/tags   │  Reconciler / tick loop        │     │
 │  └───────────┘                   └───────────────────────────────┘     │
@@ -68,9 +68,22 @@ interface WorkSource {
 - `setStatus` writes a *native* status label back to the source. Faktory maps
   its internal lifecycle phase → native status via per-source config.
 
+## Source of truth: the datasource, not the database
+
+The **datasource is authoritative** for lifecycle state and ownership. Each
+entry carries its phase in `faktory_status` and its owner in `faktory_owned_by`;
+that is the shared, durable state every operator reads. The local SQLite DB is
+only a **reconciled projection** of what the datasource surfaces to this
+operator, joined with local-only execution coordinates (herdr ids, branch, PR
+url, error) that mean nothing to anyone else. The engine reads the phase back
+from the source before validating a move, mirrors every committed move to the
+source, and only then records the projection — so `sync` reconciles the cache
+from the datasource, and deleting the DB loses nothing but a rebuildable cache.
+
 ## Lifecycle (Faktory phases)
 
-Internal, source-independent phases stored in SQLite:
+Internal, source-independent phases, authoritative in the datasource
+(`faktory_status`) and cached in SQLite:
 
 ```
 discovered → queued → dispatching → running → reviewing
@@ -121,13 +134,16 @@ names are the default.
 Each instance keeps its own state under `~/.faktory/<slug>/` (SQLite DB,
 secrets, logs) and runs its own API/web/TUI on its own port.
 
-## SQLite state
+## SQLite state (local projection + config, never the source of truth)
 
 - `config` — key/value app config (selected source, concurrency, repo path…)
 - `sources` — configured work sources (kind + JSON config, secrets by ref)
 - `secrets` — oauth tokens / API keys (local file, `chmod 600`)
-- `tasks` — one row per work item under management (phase, herdr ids, PR url…)
-- `task_events` — append-only transition/audit log
+- `tasks` — projection of the datasource: one row per work item this operator
+  sees, caching the datasource's phase alongside local-only execution
+  coordinates (herdr ids, branch, PR url, error). Rebuilt from the source by
+  `sync`; the phase is only ever written from a value the datasource reported.
+- `task_events` — append-only local audit log of transitions and reconciliations
 - `herdr_events` — raw herdr events captured by the reconciler (for repair)
 
 ## Interfaces

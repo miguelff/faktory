@@ -144,8 +144,8 @@ export class Tui {
 
   private async transitionTo(task: Task, to: Phase, force: boolean): Promise<void> {
     await this.withSpinner(`#${task.id} → ${to}${force ? " (forced)" : ""}`, async () => {
-      if (force) this.engine.tasks.transition(task.id, to, "tui", { force: true, note: "manual repair" });
-      else await this.engine.transition(task.id, to, "tui");
+      // Repair fixes the datasource (the source of truth), not just the cache.
+      await this.engine.transition(task.id, to, "tui", force ? { force: true, note: "manual repair" } : {});
       this.refresh(`#${task.id} → ${to}`);
       this.mode = "detail";
     });

@@ -34,9 +34,10 @@ export function registerTasks(program: Command): void {
   ).action(async (idRaw: string, to: string, opts) => {
     const ctx = requireInstance(selectedConfig(opts));
     const engine = buildEngine(ctx);
-    const task = opts.force
-      ? engine.tasks.transition(Number(idRaw), to as Phase, opts.actor, { force: true, note: opts.note })
-      : await engine.transition(Number(idRaw), to as Phase, opts.actor, opts.note);
+    const task = await engine.transition(Number(idRaw), to as Phase, opts.actor, {
+      force: Boolean(opts.force),
+      note: opts.note,
+    });
     console.log(`#${task.id} → ${task.phase}`);
   });
 }

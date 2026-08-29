@@ -1,8 +1,18 @@
 import type { DatabaseSync } from "node:sqlite";
 import type { Phase, Task, TaskEvent, WorkItem } from "./types.ts";
-import { canTransition } from "./lifecycle.ts";
+import { phaseForStatus } from "./lifecycle.ts";
 
-/** Task repository + the single legal way to change a task's phase. */
+/**
+ * Local projection of the tasks the datasource surfaces to this operator.
+ *
+ * The datasource is authoritative for lifecycle state (its `faktory_status`)
+ * and ownership; this table is a *cache* of that state joined with local-only
+ * execution coordinates (herdr ids, branch, PR url, error) that mean nothing to
+ * other operators. It never originates a phase: `phase` is only ever written
+ * from a value the datasource reported (`upsertFromItem`) or from a transition
+ * the engine already committed to the datasource (`record`). Delete this DB and
+ * a `sync` rebuilds every phase from the source.
+ */
 
 function rowToTask(r: Record<string, unknown>): Task {
   return {
@@ -27,24 +37,39 @@ function rowToTask(r: Record<string, unknown>): Task {
 export class TaskStore {
   constructor(private readonly db: DatabaseSync) {}
 
-  /** Insert-or-refresh a task from a source candidate. New tasks start `discovered`. */
+  /**
+   * Insert-or-reconcile a task from a datasource item. The cached phase is
+   * always taken *from* the source (`faktory_status`), so this is the point
+   * where the projection catches up to the authoritative state — a phase that
+   * changed out of band (another tool, another operator, or a rebuilt DB) is
+   * reconciled here and audited as a `source` event.
+   */
   upsertFromItem(sourceId: string, item: WorkItem): Task {
+    const phase = phaseForStatus(item.status);
     const existing = this.bySourceItem(sourceId, item.id);
     if (existing) {
       this.db
         .prepare(
-          "UPDATE tasks SET title = ?, url = ?, priority = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?",
+          "UPDATE tasks SET title = ?, url = ?, priority = ?, phase = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?",
         )
-        .run(item.title, item.url, item.priority, existing.id);
+        .run(item.title, item.url, item.priority, phase, existing.id);
+      if (existing.phase !== phase)
+        this.logEvent(existing.id, existing.phase, phase, "source", "reconciled from datasource");
       return this.byId(existing.id)!;
     }
     const res = this.db
       .prepare(
-        "INSERT INTO tasks (source_id, item_id, title, url, phase, priority) VALUES (?, ?, ?, ?, 'discovered', ?)",
+        "INSERT INTO tasks (source_id, item_id, title, url, phase, priority) VALUES (?, ?, ?, ?, ?, ?)",
       )
-      .run(sourceId, item.id, item.title, item.url, item.priority);
+      .run(sourceId, item.id, item.title, item.url, phase, item.priority);
     const task = this.byId(Number(res.lastInsertRowid))!;
-    this.logEvent(task.id, null, "discovered", "engine", "discovered in source");
+    this.logEvent(
+      task.id,
+      null,
+      phase,
+      "source",
+      phase === "discovered" ? "discovered in source" : "reconciled from datasource",
+    );
     return task;
   }
 
@@ -74,10 +99,13 @@ export class TaskStore {
   }
 
   /**
-   * The only legal phase mutation. Validates against the lifecycle table,
-   * stamps updated_at, and appends an audit event.
+   * Record a phase the engine has already committed to the datasource, together
+   * with any local execution coordinates. This is a *projection write*: it does
+   * not validate the lifecycle (the engine does that against the authoritative
+   * source status before calling here) — it just mirrors the committed state and
+   * appends an audit event.
    */
-  transition(
+  record(
     id: number,
     to: Phase,
     actor: string,
@@ -85,9 +113,6 @@ export class TaskStore {
   ): Task {
     const task = this.byId(id);
     if (!task) throw new Error(`task ${id} not found`);
-    if (!opts.force && !canTransition(task.phase, to)) {
-      throw new Error(`illegal transition ${task.phase} → ${to} for task ${id}`);
-    }
     const patch = opts.patch ?? {};
     this.db
       .prepare(

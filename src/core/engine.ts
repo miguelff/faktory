@@ -1,19 +1,23 @@
 import type { DatabaseSync } from "node:sqlite";
-import { TaskStore } from "./tasks.ts";
+import { TaskStore, type TaskPatch } from "./tasks.ts";
 import type { Task } from "./types.ts";
 import type { Phase } from "./types.ts";
-import { statusForPhase } from "./lifecycle.ts";
+import { canTransition, phaseForStatus, statusForPhase } from "./lifecycle.ts";
 import { renderHandoff, type Handoff } from "./handoff.ts";
 import type { WorkSource } from "../sources/types.ts";
 
 /**
- * The deterministic engine: sync candidates from the source and keep the
- * source's faktory_status mirrored to the internal lifecycle. Ownership rule:
- * every entry is discoverable by every instance, but only the instance that
- * won the claim (CAS on faktory_owned_by, performed the moment a task moves
- * away from discovered) may manage it. No judgement here — the orchestrator
- * agent (or the API caller) decides *what* to dispatch; this module keeps the
- * books straight.
+ * The deterministic engine. The **datasource is the source of truth** for
+ * lifecycle state (its `faktory_status`) and ownership; the local SQLite table
+ * is only a reconciled projection (see tasks.ts). So the engine reads the
+ * authoritative phase back from the source before validating a move, mirrors
+ * every committed move to the source, and records the projection afterwards.
+ *
+ * Ownership rule: every entry is discoverable by every instance, but only the
+ * instance that won the claim (CAS on faktory_owned_by, performed the moment a
+ * task moves away from discovered) may manage it. No judgement here — the
+ * orchestrator agent (or the API caller) decides *what* to dispatch; this
+ * module keeps the books straight.
  */
 export interface EngineConfig {
   prefix: string; // faktory-<slug>
@@ -56,7 +60,7 @@ export class Engine {
     const seen = new Set(items.map((i) => i.id));
     for (const task of this.tasks.list("discovered")) {
       if (!seen.has(task.itemId)) {
-        this.tasks.transition(task.id, "cancelled", "engine", {
+        this.tasks.record(task.id, "cancelled", "engine", {
           force: true,
           note: "no longer discoverable (claimed by another instance or removed)",
         });
@@ -66,28 +70,65 @@ export class Engine {
   }
 
   /**
-   * Transition a task and mirror faktory_status to the source. Leaving
-   * `discovered` first claims ownership (CAS); a lost claim cancels the local
-   * task and throws ClaimLostError.
+   * Transition a task, treating the datasource as authoritative:
+   *
+   *  1. read the item back from the source and reconcile the local projection,
+   *  2. validate the move against the source's *live* phase (not the cache),
+   *  3. bail if the source says another instance now owns the entry,
+   *  4. claim ownership (CAS) when leaving `discovered`,
+   *  5. mirror the new `faktory_status` to the source,
+   *  6. record the committed move in the local projection.
+   *
+   * A lost claim cancels the local task and throws ClaimLostError. `force`
+   * skips lifecycle validation (repair) but still writes to the datasource, so
+   * a repair fixes the shared source of truth, not just the local cache.
    */
-  async transition(taskId: number, to: Phase, actor: string, note?: string): Promise<Task> {
+  async transition(
+    taskId: number,
+    to: Phase,
+    actor: string,
+    opts: { note?: string; force?: boolean; patch?: Partial<TaskPatch> } = {},
+  ): Promise<Task> {
     const before = this.tasks.byId(taskId);
     if (!before) throw new Error(`task ${taskId} not found`);
-    if (before.phase === "discovered") {
-      // Dropping a discovered task locally touches nothing we don't own.
-      if (to === "cancelled") return this.tasks.transition(taskId, to, actor, { note });
+
+    // The datasource is authoritative: read it back and reconcile before acting.
+    const item = await this.source.getItem(before.itemId);
+    if (item) this.tasks.upsertFromItem(this.source.id, item);
+    const current = item ? phaseForStatus(item.status) : before.phase;
+
+    // Someone else owns it now — the source has moved on without us.
+    if (item?.ownedBy && item.ownedBy !== this.cfg.prefix) {
+      this.tasks.record(taskId, "cancelled", "engine", {
+        force: true,
+        note: `owned by ${item.ownedBy}`,
+      });
+      throw new ClaimLostError(taskId, item.ownedBy);
+    }
+
+    if (!opts.force && !canTransition(current, to)) {
+      throw new Error(`illegal transition ${current} → ${to} for task ${taskId}`);
+    }
+
+    // Cancelling a still-discoverable (unowned) task is a purely local decision
+    // — we never claimed it, so we must not write to an entry we don't own.
+    if (current === "discovered" && to === "cancelled") {
+      return this.tasks.record(taskId, to, actor, { note: opts.note, force: opts.force, patch: opts.patch });
+    }
+
+    if (current === "discovered") {
       const owner = await this.source.claim(before.itemId);
       if (owner !== this.cfg.prefix) {
-        this.tasks.transition(taskId, "cancelled", "engine", {
+        this.tasks.record(taskId, "cancelled", "engine", {
           force: true,
           note: `claim lost to ${owner}`,
         });
         throw new ClaimLostError(taskId, owner);
       }
     }
-    const task = this.tasks.transition(taskId, to, actor, { note });
-    await this.source.setStatus(task.itemId, statusForPhase(task.phase));
-    return task;
+
+    await this.source.setStatus(before.itemId, statusForPhase(to));
+    return this.tasks.record(taskId, to, actor, { note: opts.note, force: opts.force, patch: opts.patch });
   }
 
   /**

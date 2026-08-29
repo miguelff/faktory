@@ -1,6 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { TRANSITIONS, canTransition, statusForPhase, DISCOVERABLE, FAKTORY_STATUSES } from "../src/core/lifecycle.ts";
+import {
+  TRANSITIONS,
+  canTransition,
+  statusForPhase,
+  phaseForStatus,
+  DISCOVERABLE,
+  FAKTORY_STATUSES,
+} from "../src/core/lifecycle.ts";
 import { PHASES, TERMINAL_PHASES } from "../src/core/types.ts";
 
 test("every phase has a transition entry", () => {
@@ -45,4 +52,13 @@ test("faktory_status covers discoverable plus every non-initial phase", () => {
   assert.ok(FAKTORY_STATUSES.includes(DISCOVERABLE));
   for (const p of TERMINAL_PHASES) assert.ok(FAKTORY_STATUSES.includes(p));
   assert.ok(!FAKTORY_STATUSES.includes("discovered"));
+});
+
+test("phaseForStatus inverts statusForPhase (the datasource is authoritative)", () => {
+  // Round-trips for every phase, so a phase written to the source reads back.
+  for (const p of PHASES) assert.equal(phaseForStatus(statusForPhase(p)), p);
+  // Unset / discoverable / unknown all degrade to discovered rather than corrupt.
+  assert.equal(phaseForStatus(null), "discovered");
+  assert.equal(phaseForStatus(DISCOVERABLE), "discovered");
+  assert.equal(phaseForStatus("nonsense"), "discovered");
 });

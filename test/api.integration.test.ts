@@ -12,9 +12,15 @@ import type { WorkSource } from "../src/sources/types.ts";
  * Integration test: real SQLite + real HTTP server on an ephemeral port,
  * with an in-memory WorkSource double that records claims and status writes.
  */
+/**
+ * In-memory WorkSource double. It behaves like a real source: reads reflect
+ * prior writes (setStatus/claim mutate the item), and candidacy is filtered to
+ * unowned or own entries — so the datasource, not the local DB, is authoritative.
+ */
 class FakeSource implements WorkSource {
   readonly kind = "fake";
   readonly id = "primary";
+  readonly prefix = "faktory-test";
   items: WorkItem[] = [];
   owners: Record<string, string> = {};
   statuses: Record<string, string> = {};
@@ -23,19 +29,26 @@ class FakeSource implements WorkSource {
   nextClaimWinner: string | null = null;
 
   async listCandidates() {
-    return this.items;
+    return this.items.filter(
+      (i) => (!i.ownedBy || i.ownedBy === this.prefix) && i.status !== "done",
+    );
   }
   async getItem(id: string) {
     return this.items.find((i) => i.id === id) ?? null;
   }
   async claim(id: string) {
     if (this.owners[id]) return this.owners[id]!;
-    this.owners[id] = this.nextClaimWinner ?? "faktory-test";
+    const winner = this.nextClaimWinner ?? this.prefix;
     this.nextClaimWinner = null;
-    return this.owners[id]!;
+    this.owners[id] = winner;
+    const item = this.items.find((i) => i.id === id);
+    if (item) item.ownedBy = winner;
+    return winner;
   }
   async setStatus(id: string, status: string) {
     this.statuses[id] = status;
+    const item = this.items.find((i) => i.id === id);
+    if (item) item.status = status;
   }
   async comment(id: string, body: string) {
     this.comments.push({ id, body });
@@ -137,6 +150,40 @@ test("sync cancels discovered tasks that were claimed elsewhere", async () => {
   await api("/api/sync", { method: "POST" });
   const { body: after } = await api(`/api/tasks/${t.id}`);
   assert.equal(after.task.phase, "cancelled");
+});
+
+test("the datasource is authoritative: sync reconciles the local phase", async () => {
+  source.items = [...source.items, workItem("n9", "Nine", 1)];
+  await api("/api/sync", { method: "POST" });
+  let { body: list } = await api("/api/tasks");
+  const t = list.tasks.find((x: any) => x.itemId === "n9");
+  assert.equal(t.phase, "discovered");
+  // The datasource is advanced out of band (another operator / another tool).
+  const it = source.items.find((i) => i.id === "n9")!;
+  it.ownedBy = "faktory-test";
+  it.status = "blocked";
+  await api("/api/sync", { method: "POST" });
+  ({ body: list } = await api("/api/tasks"));
+  const after = list.tasks.find((x: any) => x.itemId === "n9");
+  assert.equal(after.phase, "blocked", "local projection follows the datasource");
+});
+
+test("the datasource is authoritative: validation uses the source, not the cache", async () => {
+  source.items = [...source.items, workItem("n10", "Ten", 1)];
+  await api("/api/sync", { method: "POST" });
+  const { body: list } = await api("/api/tasks");
+  const t = list.tasks.find((x: any) => x.itemId === "n10");
+  assert.equal(t.phase, "discovered", "stale local cache says discovered");
+  // The datasource already has this entry in `running` (owned by us).
+  const it = source.items.find((i) => i.id === "n10")!;
+  it.ownedBy = "faktory-test";
+  it.status = "running";
+  // discovered → queued is legal against the cache but illegal from running.
+  const res = await api(`/api/tasks/${t.id}/transition`, {
+    method: "POST",
+    body: JSON.stringify({ to: "queued", actor: "test" }),
+  });
+  assert.equal(res.status, 409, "validated against the datasource's live phase");
 });
 
 test("invalid phase names are rejected", async () => {

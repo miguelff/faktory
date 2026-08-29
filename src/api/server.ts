@@ -58,7 +58,9 @@ export function createApiServer(deps: ApiDeps): Server {
     const to = body.to as Phase;
     if (!PHASES.includes(to)) return json(res, 400, { error: `invalid phase ${JSON.stringify(body.to)}` });
     try {
-      const task = await deps.engine.transition(Number(p.id), to, String(body.actor ?? "api"), body.note);
+      const task = await deps.engine.transition(Number(p.id), to, String(body.actor ?? "api"), {
+        note: body.note,
+      });
       json(res, 200, { task });
     } catch (e) {
       json(res, 409, { error: String((e as Error).message) });
@@ -99,7 +101,7 @@ export function createApiServer(deps: ApiDeps): Server {
       return json(res, 409, { error: `task ${id} is ${task.phase}, not queued`, task });
     }
     try {
-      await deps.engine.transition(id, "dispatching", "api", "dispatch requested");
+      await deps.engine.transition(id, "dispatching", "api", { note: "dispatch requested" });
       const opts: DispatchOptions = {
         agentKind: body.agentKind ?? deps.dispatchDefaults?.agentKind ?? "pi",
         repoCwd: body.repoCwd ?? deps.dispatchDefaults?.repoCwd,
@@ -107,15 +109,30 @@ export function createApiServer(deps: ApiDeps): Server {
         kickoffCommand: body.kickoffCommand ?? deps.dispatchDefaults?.kickoffCommand,
       };
       const result = await dispatchTask(deps.herdr, task, deps.prefix, opts);
-      const updated = deps.engine.tasks.transition(id, "running", "api", { note: "agent started", patch: result });
+      const updated = await deps.engine.transition(id, "running", "api", {
+        note: "agent started",
+        patch: result,
+      });
       json(res, 200, { task: updated, herdr: result });
     } catch (e) {
-      const failed = deps.engine.tasks.transition(id, "failed", "api", {
-        note: String((e as Error).message),
-        force: true,
-        patch: { error: String((e as Error).message) },
-      });
-      json(res, 500, { error: String((e as Error).message), task: failed });
+      const msg = String((e as Error).message);
+      // Mark failed in both the datasource and the projection; fall back to a
+      // projection-only record if the source write itself is what failed.
+      let failed: typeof task;
+      try {
+        failed = await deps.engine.transition(id, "failed", "api", {
+          note: msg,
+          force: true,
+          patch: { error: msg },
+        });
+      } catch {
+        failed = deps.engine.tasks.record(id, "failed", "api", {
+          force: true,
+          note: msg,
+          patch: { error: msg },
+        });
+      }
+      json(res, 500, { error: msg, task: failed });
     }
   });
 
