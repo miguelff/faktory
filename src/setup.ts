@@ -7,6 +7,7 @@ import { getSecret, openDb, setConfig, setSecret } from "./core/db.ts";
 import { createSource } from "./sources/factory.ts";
 import { FAKTORY_STATUSES } from "./core/lifecycle.ts";
 import { FAKTORY_OWNED_AT, FAKTORY_OWNED_BY, FAKTORY_STATUS } from "./sources/notion.ts";
+import type { Invite } from "./core/invite.ts";
 
 /**
  * Terminal setup wizard. Produces one config under ~/.faktory/<slug>/ (its own
@@ -280,6 +281,87 @@ export async function runSetup(opts: SetupOptions = {}): Promise<string> {
     dbh.close();
 
     console.log(`\n  ${OK("✔ done.")} ${DIM(`bin/faktory serve ${ref.slug} → http://127.0.0.1:${port}`)}\n`);
+    return ref.slug;
+  } finally {
+    ui.close();
+  }
+}
+
+export interface JoinOptions {
+  /** Config name; prompted for when absent. */
+  name?: string;
+}
+
+/**
+ * Set up a new local config from a collaboration invite. The datasource (kind,
+ * config, access secret) comes from the invite; the operator only chooses a
+ * name and dispatch defaults. The new config gets its own slug/prefix, so it
+ * discovers every entry in the shared datasource and owns only what it claims.
+ *
+ * Callers must reject invites whose datasource is already configured locally
+ * (see datasourceIdentity) before calling this — join is about *new* links.
+ */
+export async function joinFromInvite(invite: Invite, opts: JoinOptions = {}): Promise<string> {
+  if (invite.kind !== "notion") throw new Error(`joining a ${invite.kind} datasource is not supported yet`);
+  const cfg = invite.config as { databaseId?: string; priorityProperty?: string };
+  if (!cfg.databaseId) throw new Error("invite is missing its Notion database id");
+
+  const ui = createPrompter();
+  try {
+    console.log(`\n${B("⚙ faktory join")} ${DIM("— connecting to a shared datasource from an invite")}\n`);
+
+    // 1. Config name → ~/.faktory/<slug>/ (own owner id, distinct from the inviter's)
+    const name = opts.name ?? (await ui.ask("Config name?", "main"));
+    const ref = instanceRef(name);
+    console.log(DIM(`  → owner id will be ${B(ref.prefix)}, state in ${ref.dir}`));
+
+    // 2. Authenticate against the shared datasource: the invite's secret when
+    //    present, otherwise fall back to the normal auth flow.
+    const token = invite.secret ?? (await authenticateNotion(ui));
+    const me = await notion(token, "/users/me");
+    console.log(OK(`  ✔ authenticated as ${me?.name ?? me?.bot?.owner?.type ?? "integration"}`));
+    const schema = await notion(token, `/databases/${cfg.databaseId}`);
+    const dbTitle = (schema.title ?? []).map((t: any) => t.plain_text).join("") || "(untitled)";
+    console.log(OK(`  ✔ reached shared database "${dbTitle}"`));
+
+    // 3. Dispatch defaults (the datasource is fixed by the invite)
+    const repoCwd = await ui.ask("Repository Faktory should dispatch work in?", process.cwd());
+    const agentKind = await ui.ask("Agent harness for /kickoff?", "pi");
+    const port = await ui.ask("Port for the web board / API?", "4600");
+
+    // 4. Confirm & write
+    console.log(`\n  ${B("Summary")}
+    config     ${ref.slug} ${DIM(`(owner id ${ref.prefix}, state ${ref.dir})`)}
+    database   ${dbTitle} ${DIM("(shared via invite)")}
+    priority   ${cfg.priorityProperty ?? "(none)"}
+    dispatch   ${agentKind} in ${repoCwd}
+    board      http://127.0.0.1:${port}\n`);
+    if ((await ui.ask("Save? (y/n)", "y")).toLowerCase() !== "y") throw new Error("aborted — nothing saved");
+
+    ensureInstanceDir(ref);
+    const dbh = openDb(ref.dbPath);
+    setSecret(dbh, "notion.token", token);
+    const config = { databaseId: cfg.databaseId, priorityProperty: cfg.priorityProperty };
+    dbh
+      .prepare(
+        "INSERT INTO sources (id, kind, config) VALUES ('primary','notion',?) ON CONFLICT(id) DO UPDATE SET kind='notion', config=excluded.config",
+      )
+      .run(JSON.stringify(config));
+    setConfig(dbh, "repoCwd", repoCwd);
+    setConfig(dbh, "agentKind", agentKind);
+    setConfig(dbh, "port", port);
+
+    const source = createSource(
+      { id: "primary", kind: "notion", config: config as unknown as Record<string, unknown> },
+      { getSecret: (k) => getSecret(dbh, k), prefix: ref.prefix },
+    );
+    if (source.ensureProperties) {
+      const created = await source.ensureProperties();
+      if (created.length) console.log(DIM(`  added ownership propert${created.length === 1 ? "y" : "ies"}: ${created.join(", ")}`));
+    }
+    dbh.close();
+
+    console.log(`\n  ${OK("✔ joined.")} ${DIM(`bin/faktory serve ${ref.slug} → http://127.0.0.1:${port}`)}\n`);
     return ref.slug;
   } finally {
     ui.close();
