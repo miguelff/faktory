@@ -42,9 +42,9 @@ every database entry is discoverable; an instance claims it (CAS on
    the instance secret store; datasource picker replaces manual
    `source:set-notion` flags. (CLI-side OAuth shipped with the wizard.)
 5. ☐ **Auto-dispatch policy (optional)** — engine tick: promote `discovered`
-   candidates to `queued` (priority order, `Blocked By` relation gate) and
-   dispatch up to `concurrency` (config, default 2). Off by default; the
-   orchestrator agent remains the primary brain.
+   candidates to `queued` (priority order, honouring the depends-on gate — see
+   below) and dispatch up to `concurrency` (config, default 2). Off by default;
+   the orchestrator agent remains the primary brain.
 6. ☐ **Deploy hook** — per-instance `deployCommand`; `ready_to_deploy →
    deploying → done/failed` runs it in a herdr pane with output captured.
 
@@ -64,6 +64,17 @@ every database entry is discoverable; an instance claims it (CAS on
   already allows it; CLI/API assume `primary` today).
 - ☐ **Blind-review evidence** — persist review iterations/findings from the
   kickoff loop in `task_events` for the board.
+
+## v1.5 — ordering
+
+- ☑ **Task dependencies ("depends-on")** — model dependencies abstractly on
+  `WorkItem.dependsOn`; persist edges in `task_dependencies`; gate
+  `discovered → queued` until every dependency is `done` (local phase or
+  source `faktory_status`), raising `DependenciesUnmetError` before any claim.
+  Notion implements it as a self-referential `faktory_depends_on` relation
+  (auto-provisioned). Surfaced on `GET /api/tasks/:id` and the transition 409
+  `blockers`. *Acceptance: a task blocked by an unfinished item cannot be
+  queued; finishing the blocker unblocks it.*
 
 ## Engineering debt / hardening
 

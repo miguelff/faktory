@@ -36,6 +36,7 @@ export class TaskStore {
           "UPDATE tasks SET title = ?, url = ?, priority = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?",
         )
         .run(item.title, item.url, item.priority, existing.id);
+      if (item.dependsOn) this.setDependencies(existing.id, item.dependsOn);
       return this.byId(existing.id)!;
     }
     const res = this.db
@@ -44,8 +45,32 @@ export class TaskStore {
       )
       .run(sourceId, item.id, item.title, item.url, item.priority);
     const task = this.byId(Number(res.lastInsertRowid))!;
+    if (item.dependsOn) this.setDependencies(task.id, item.dependsOn);
     this.logEvent(task.id, null, "discovered", "engine", "discovered in source");
     return task;
+  }
+
+  /**
+   * Replace a task's dependency set with the source's current truth. Stored by
+   * the dependency's source item id; self-references are dropped defensively.
+   */
+  setDependencies(taskId: number, dependsOnItemIds: string[]): void {
+    const self = this.byId(taskId);
+    this.db.prepare("DELETE FROM task_dependencies WHERE task_id = ?").run(taskId);
+    const ins = this.db.prepare(
+      "INSERT OR IGNORE INTO task_dependencies (task_id, depends_on_item_id) VALUES (?, ?)",
+    );
+    for (const dep of dependsOnItemIds) {
+      if (dep && dep !== self?.itemId) ins.run(taskId, dep);
+    }
+  }
+
+  /** Source item ids this task depends on. */
+  dependencyItemIds(taskId: number): string[] {
+    const rows = this.db
+      .prepare("SELECT depends_on_item_id AS d FROM task_dependencies WHERE task_id = ? ORDER BY d")
+      .all(taskId) as { d: string }[];
+    return rows.map((r) => r.d);
   }
 
   byId(id: number): Task | null {

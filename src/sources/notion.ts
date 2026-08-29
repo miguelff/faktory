@@ -24,6 +24,8 @@ export interface NotionSourceConfig {
   statusProperty?: string;
   ownedByProperty?: string;
   ownedAtProperty?: string;
+  /** Self-referential relation modelling "depends-on". Default faktory_depends_on. */
+  dependsOnProperty?: string;
   /** Key in the instance secret store holding the token. Default "notion.token". */
   tokenSecret?: string;
 }
@@ -31,6 +33,7 @@ export interface NotionSourceConfig {
 export const FAKTORY_STATUS = "faktory_status";
 export const FAKTORY_OWNED_BY = "faktory_owned_by";
 export const FAKTORY_OWNED_AT = "faktory_owned_at";
+export const FAKTORY_DEPENDS_ON = "faktory_depends_on";
 
 const NOTION_VERSION = "2022-06-28";
 
@@ -39,6 +42,7 @@ function propNames(cfg: NotionSourceConfig) {
     status: cfg.statusProperty ?? FAKTORY_STATUS,
     ownedBy: cfg.ownedByProperty ?? FAKTORY_OWNED_BY,
     ownedAt: cfg.ownedAtProperty ?? FAKTORY_OWNED_AT,
+    dependsOn: cfg.dependsOnProperty ?? FAKTORY_DEPENDS_ON,
   };
 }
 
@@ -57,6 +61,10 @@ export function pageToWorkItem(page: any, cfg: NotionSourceConfig): WorkItem {
   const prioProp = cfg.priorityProperty ? props[cfg.priorityProperty] : undefined;
   const priority = prioProp?.type === "number" ? (prioProp.number ?? null) : null;
 
+  const dependsOn = (props[names.dependsOn]?.relation ?? [])
+    .map((r: any) => r?.id)
+    .filter((id: unknown): id is string => typeof id === "string");
+
   return {
     id: page.id,
     title,
@@ -65,6 +73,7 @@ export function pageToWorkItem(page: any, cfg: NotionSourceConfig): WorkItem {
     ownedBy,
     ownedAt,
     priority,
+    dependsOn,
     updatedAt: page.last_edited_time ?? null,
     raw: page,
   };
@@ -207,6 +216,11 @@ class NotionSource implements WorkSource {
       [this.names.status]: { select: { options: FAKTORY_STATUSES.map((name) => ({ name })) } },
       [this.names.ownedBy]: { rich_text: {} },
       [this.names.ownedAt]: { date: {} },
+      // Self-referential relation: each entry points at the entries it
+      // depends on within the same backlog database.
+      [this.names.dependsOn]: {
+        relation: { database_id: this.cfg.databaseId, single_property: {} },
+      },
     };
     const missing = Object.keys(wanted).filter((name) => !existing[name]);
     if (missing.length === 0) return [];

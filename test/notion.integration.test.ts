@@ -228,17 +228,29 @@ test("pageToWorkItem tolerates missing properties", () => {
   assert.equal(item.status, null);
   assert.equal(item.ownedBy, null);
   assert.equal(item.ownedAt, null);
+  assert.deepEqual(item.dependsOn, []);
 });
 
 test("ensureProperties adds only the missing faktory_* columns", async () => {
   const source = makeSource();
   state.dbProperties = { Name: { type: "title" }, faktory_status: { type: "select" } };
   const created = await source.ensureProperties!();
-  assert.deepEqual(created, ["faktory_owned_by", "faktory_owned_at"]);
+  assert.deepEqual(created, ["faktory_owned_by", "faktory_owned_at", "faktory_depends_on"]);
   assert.ok(state.dbProperties.faktory_owned_by.rich_text);
   assert.ok(state.dbProperties.faktory_owned_at.date);
+  assert.equal(state.dbProperties.faktory_depends_on.relation.database_id, "db-1");
   const again = await source.ensureProperties!();
   assert.deepEqual(again, [], "idempotent");
+});
+
+test("pageToWorkItem reads the depends-on relation into dependsOn", () => {
+  const p = page("pdep");
+  (p.properties as Record<string, unknown>).faktory_depends_on = {
+    type: "relation",
+    relation: [{ id: "dep-a" }, { id: "dep-b" }],
+  };
+  const item = pageToWorkItem(p, cfg);
+  assert.deepEqual(item.dependsOn, ["dep-a", "dep-b"]);
 });
 
 test("buildCandidateFilter honours custom property names", () => {

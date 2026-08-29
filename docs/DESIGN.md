@@ -64,9 +64,24 @@ interface WorkSource {
   a *value* (a query filter). For GitHub (future): a repo + issue query. For
   Jira (future): a JQL string. Only **Notion** is implemented now; the factory
   registry (`sources/factory.ts`) is ready for the others.
-- A `WorkItem` is the normalized unit: `{ id, title, url, status, tags, ... }`.
+- A `WorkItem` is the normalized unit: `{ id, title, url, status, dependsOn, ... }`.
 - `setStatus` writes a *native* status label back to the source. Faktory maps
   its internal lifecycle phase → native status via per-source config.
+
+### Dependencies ("depends-on")
+
+An item can declare that it **depends on** other items — they must be finished
+before it may be worked, so an ordered backlog is tackled in order. This is
+modelled abstractly on `WorkItem.dependsOn` (a flat list of source-native ids);
+each adapter maps its own relation to it (Notion: a self-referential relation
+property `faktory_depends_on`; GitHub/Jira later: issue references / links).
+The engine persists the edges (`task_dependencies`, keyed by the dependency's
+source item id) on every sync and gates the `discovered → queued` transition:
+a dependency is *satisfied* only once it is `done` — proven by a local task in
+phase `done` **or** the source reporting its `faktory_status = done` (so
+dependencies owned by another instance, or already done and filtered out of
+candidacy, still resolve). Unmet dependencies raise `DependenciesUnmetError`
+*before* any ownership claim, leaving the blocked task untouched.
 
 ## Lifecycle (Faktory phases)
 
@@ -127,6 +142,7 @@ secrets, logs) and runs its own API/web/TUI on its own port.
 - `sources` — configured work sources (kind + JSON config, secrets by ref)
 - `secrets` — oauth tokens / API keys (local file, `chmod 600`)
 - `tasks` — one row per work item under management (phase, herdr ids, PR url…)
+- `task_dependencies` — "depends-on" edges (task → dependency source item id)
 - `task_events` — append-only transition/audit log
 - `herdr_events` — raw herdr events captured by the reconciler (for repair)
 

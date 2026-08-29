@@ -2,7 +2,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { Engine } from "../core/engine.ts";
+import { DependenciesUnmetError, type Engine } from "../core/engine.ts";
 import type { Phase } from "../core/types.ts";
 import { PHASES } from "../core/types.ts";
 import type { HerdrClient } from "../herdr/client.ts";
@@ -45,7 +45,11 @@ export function createApiServer(deps: ApiDeps): Server {
   route("GET", "/api/tasks/:id", async (_req, res, p) => {
     const task = deps.engine.tasks.byId(Number(p.id));
     if (!task) return json(res, 404, { error: "not found" });
-    json(res, 200, { task, events: deps.engine.tasks.events(task.id) });
+    json(res, 200, {
+      task,
+      events: deps.engine.tasks.events(task.id),
+      dependencies: await deps.engine.dependencies(task.id),
+    });
   });
 
   route("POST", "/api/sync", async (_req, res) => {
@@ -61,7 +65,8 @@ export function createApiServer(deps: ApiDeps): Server {
       const task = await deps.engine.transition(Number(p.id), to, String(body.actor ?? "api"), body.note);
       json(res, 200, { task });
     } catch (e) {
-      json(res, 409, { error: String((e as Error).message) });
+      const blockers = e instanceof DependenciesUnmetError ? e.blockers : undefined;
+      json(res, 409, { error: String((e as Error).message), ...(blockers ? { blockers } : {}) });
     }
   });
 

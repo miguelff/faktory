@@ -31,6 +31,15 @@ export interface WorkItem {
   ownedAt: string | null;
   /** Larger number = more important. Sources map their own scale. */
   priority: number | null;
+  /**
+   * Source-native ids of the items this one depends on ("depends-on" /
+   * "blocked by"): they must be finished before this item may be worked. The
+   * relation is source-specific (a Notion relation, a GitHub issue reference,
+   * a Jira link) but the normalized shape is always a flat list of ids.
+   * `undefined` means the source did not report dependencies (leave whatever is
+   * already tracked untouched); `[]` means it has none.
+   */
+  dependsOn?: string[];
   updatedAt: string | null;
   /** Untouched source payload for debugging / advanced policy. */
   raw?: unknown;

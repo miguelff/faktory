@@ -18,6 +18,7 @@ export function registerSource(program: Command): void {
       .description("configure the Notion source (creates the config if needed)")
       .requiredOption("--database <id>", "Notion backlog database id")
       .option("--priority-property <name>", "number property used for priority")
+      .option("--depends-on-property <name>", "relation property modelling depends-on (default faktory_depends_on)")
       .option("--token <token>", "Notion integration token (defaults to $NOTION_TOKEN)"),
   ).action(async (opts) => {
     const name = selectedConfig(opts);
@@ -27,7 +28,11 @@ export function registerSource(program: Command): void {
     const databaseId = opts.database as string;
     const token = (opts.token as string | undefined) ?? process.env.NOTION_TOKEN;
     if (token) setSecret(db, "notion.token", token);
-    const config = { databaseId, priorityProperty: opts.priorityProperty as string | undefined };
+    const config = {
+      databaseId,
+      priorityProperty: opts.priorityProperty as string | undefined,
+      dependsOnProperty: opts.dependsOnProperty as string | undefined,
+    };
     db.prepare(
       "INSERT INTO sources (id, kind, config) VALUES ('primary', 'notion', ?) ON CONFLICT(id) DO UPDATE SET kind='notion', config=excluded.config",
     ).run(JSON.stringify(config));
@@ -39,7 +44,7 @@ export function registerSource(program: Command): void {
     );
     if (src.ensureProperties) {
       const created = await src.ensureProperties();
-      if (created.length) console.log(`added ownership propert${created.length === 1 ? "y" : "ies"}: ${created.join(", ")}`);
+      if (created.length) console.log(`added propert${created.length === 1 ? "y" : "ies"}: ${created.join(", ")}`);
     }
   });
 }

@@ -28,6 +28,33 @@ export class ClaimLostError extends Error {
   }
 }
 
+/** Resolved state of one "depends-on" edge for a task. */
+export interface DependencyStatus {
+  /** Source item id of the dependency. */
+  itemId: string;
+  /** Best-known title (local task or freshly read source item). */
+  title: string | null;
+  /** Local lifecycle phase if this instance tracks the dependency. */
+  phase: Phase | null;
+  /** faktory_status read from the source (covers deps owned elsewhere). */
+  status: string | null;
+  /** True once the dependency is finished and no longer blocks. */
+  satisfied: boolean;
+}
+
+export class DependenciesUnmetError extends Error {
+  constructor(
+    readonly taskId: number,
+    readonly blockers: DependencyStatus[],
+  ) {
+    const ids = blockers.map((b) => b.itemId).join(", ");
+    super(
+      `task ${taskId} is blocked by ${blockers.length} unmet ` +
+        `${blockers.length === 1 ? "dependency" : "dependencies"}: ${ids}`,
+    );
+  }
+}
+
 export class Engine {
   readonly tasks: TaskStore;
 
@@ -66,9 +93,39 @@ export class Engine {
   }
 
   /**
-   * Transition a task and mirror faktory_status to the source. Leaving
-   * `discovered` first claims ownership (CAS); a lost claim cancels the local
-   * task and throws ClaimLostError.
+   * Resolve every "depends-on" edge for a task. A dependency is *satisfied*
+   * once it is finished: either a local task tracks it as `done`, or the
+   * source reports its faktory_status as `done` (so dependencies owned by
+   * another instance, or already done and filtered out of candidacy, still
+   * resolve correctly). Anything else — in flight, blocked, or not a
+   * faktory-managed item at all — counts as unmet, so work stays ordered.
+   */
+  async dependencies(taskId: number): Promise<DependencyStatus[]> {
+    const out: DependencyStatus[] = [];
+    for (const itemId of this.tasks.dependencyItemIds(taskId)) {
+      const local = this.tasks.bySourceItem(this.source.id, itemId);
+      const phase = local?.phase ?? null;
+      let title = local?.title ?? null;
+      let status: string | null = phase === "done" ? "done" : null;
+      let satisfied = phase === "done";
+      if (!satisfied) {
+        const item = await this.source.getItem(itemId);
+        status = item?.status ?? null;
+        title = title ?? item?.title ?? null;
+        satisfied = status === "done";
+      }
+      out.push({ itemId, title, phase, status, satisfied });
+    }
+    return out;
+  }
+
+  /**
+   * Transition a task and mirror faktory_status to the source. Promoting a
+   * `discovered` task to `queued` is gated on its "depends-on" edges so work
+   * is tackled in order; unmet dependencies throw DependenciesUnmetError
+   * before anything is claimed. Leaving `discovered` otherwise claims
+   * ownership (CAS); a lost claim cancels the local task and throws
+   * ClaimLostError.
    */
   async transition(taskId: number, to: Phase, actor: string, note?: string): Promise<Task> {
     const before = this.tasks.byId(taskId);
@@ -76,6 +133,10 @@ export class Engine {
     if (before.phase === "discovered") {
       // Dropping a discovered task locally touches nothing we don't own.
       if (to === "cancelled") return this.tasks.transition(taskId, to, actor, { note });
+      if (to === "queued") {
+        const blockers = (await this.dependencies(taskId)).filter((d) => !d.satisfied);
+        if (blockers.length) throw new DependenciesUnmetError(taskId, blockers);
+      }
       const owner = await this.source.claim(before.itemId);
       if (owner !== this.cfg.prefix) {
         this.tasks.transition(taskId, "cancelled", "engine", {

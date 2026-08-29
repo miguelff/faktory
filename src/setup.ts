@@ -6,7 +6,12 @@ import { ensureInstanceDir, instanceRef, listInstances } from "./core/instance.t
 import { getSecret, openDb, setConfig, setSecret } from "./core/db.ts";
 import { createSource } from "./sources/factory.ts";
 import { FAKTORY_STATUSES } from "./core/lifecycle.ts";
-import { FAKTORY_OWNED_AT, FAKTORY_OWNED_BY, FAKTORY_STATUS } from "./sources/notion.ts";
+import {
+  FAKTORY_DEPENDS_ON,
+  FAKTORY_OWNED_AT,
+  FAKTORY_OWNED_BY,
+  FAKTORY_STATUS,
+} from "./sources/notion.ts";
 import type { Invite } from "./core/invite.ts";
 
 /**
@@ -252,6 +257,7 @@ export async function runSetup(opts: SetupOptions = {}): Promise<string> {
     config     ${ref.slug} ${DIM(`(owner id ${ref.prefix}, state ${ref.dir})`)}
     database   ${db.title}${db.created ? DIM(" (new)") : ""}
     ownership  ${FAKTORY_STATUS} / ${FAKTORY_OWNED_BY} / ${FAKTORY_OWNED_AT} ${DIM("(added if missing)")}
+    depends-on ${FAKTORY_DEPENDS_ON} ${DIM("(relation, added if missing)")}
     priority   ${priorityProperty ?? "(none)"}
     dispatch   ${agentKind} in ${repoCwd}
     board      http://127.0.0.1:${port}\n`);
@@ -276,7 +282,7 @@ export async function runSetup(opts: SetupOptions = {}): Promise<string> {
     );
     if (source.ensureProperties) {
       const created = await source.ensureProperties();
-      if (created.length) console.log(DIM(`  added ownership propert${created.length === 1 ? "y" : "ies"}: ${created.join(", ")}`));
+      if (created.length) console.log(DIM(`  added propert${created.length === 1 ? "y" : "ies"}: ${created.join(", ")}`));
     }
     dbh.close();
 
@@ -368,7 +374,7 @@ export async function joinFromInvite(invite: Invite, opts: JoinOptions = {}): Pr
     );
     if (source.ensureProperties) {
       const created = await source.ensureProperties();
-      if (created.length) console.log(DIM(`  added ownership propert${created.length === 1 ? "y" : "ies"}: ${created.join(", ")}`));
+      if (created.length) console.log(DIM(`  added propert${created.length === 1 ? "y" : "ies"}: ${created.join(", ")}`));
     }
     dbh.close();
 

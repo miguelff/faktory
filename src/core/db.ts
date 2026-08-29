@@ -57,6 +57,19 @@ const MIGRATIONS: string[] = [
   CREATE INDEX idx_tasks_phase ON tasks(phase);
   CREATE INDEX idx_task_events_task ON task_events(task_id);
   `,
+  `
+  -- Task dependencies ("depends-on"): a task may not be worked until every
+  -- item it depends on is finished. Keyed by the dependency's *source item id*
+  -- (not a local task id) because a dependency can be discovered later, be
+  -- owned by another instance, or already be done and filtered out of
+  -- candidacy — in all of those cases there may be no local task row yet.
+  CREATE TABLE task_dependencies (
+    task_id            INTEGER NOT NULL REFERENCES tasks(id),
+    depends_on_item_id TEXT NOT NULL,
+    PRIMARY KEY (task_id, depends_on_item_id)
+  );
+  CREATE INDEX idx_task_deps_task ON task_dependencies(task_id);
+  `,
 ];
 
 export function openDb(path: string): DatabaseSync {

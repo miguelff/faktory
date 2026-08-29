@@ -182,6 +182,59 @@ test("comment with an empty body is rejected", async () => {
   assert.equal(res.status, 400);
 });
 
+test("queueing is gated on depends-on and the 409 lists blockers", async () => {
+  const db = openDb(":memory:");
+  db.prepare("INSERT INTO sources (id, kind, config) VALUES ('primary', 'fake', '{}')").run();
+  const src = new FakeSource();
+  src.items = [
+    { ...workItem("dep", "Dependency", 1) },
+    { ...workItem("blk", "Blocked", 1), dependsOn: ["dep"] },
+  ];
+  const engine = new Engine(db, src, { prefix: "faktory-test" });
+  const srv = createApiServer({ engine, prefix: "faktory-test" });
+  await new Promise<void>((r) => srv.listen(0, "127.0.0.1", r));
+  const b = `http://127.0.0.1:${(srv.address() as AddressInfo).port}`;
+  const call = async (path: string, init?: RequestInit) => {
+    const res = await fetch(`${b}${path}`, { headers: { "Content-Type": "application/json" }, ...init });
+    return { status: res.status, body: (await res.json()) as any };
+  };
+  try {
+    await call("/api/sync", { method: "POST" });
+    const { body: list } = await call("/api/tasks");
+    const dep = list.tasks.find((x: any) => x.itemId === "dep");
+    const blk = list.tasks.find((x: any) => x.itemId === "blk");
+
+    // Detail surfaces the unmet dependency.
+    const detail = await call(`/api/tasks/${blk.id}`);
+    assert.equal(detail.body.dependencies.length, 1);
+    assert.equal(detail.body.dependencies[0].itemId, "dep");
+    assert.equal(detail.body.dependencies[0].satisfied, false);
+
+    // Queueing is refused, nothing claimed, blockers reported.
+    const blocked = await call(`/api/tasks/${blk.id}/transition`, {
+      method: "POST",
+      body: JSON.stringify({ to: "queued" }),
+    });
+    assert.equal(blocked.status, 409);
+    assert.equal(blocked.body.blockers[0].itemId, "dep");
+    assert.equal(src.owners.blk, undefined, "blocked task is never claimed");
+
+    // Finish the dependency, then the blocked task can be queued.
+    for (const to of ["queued", "dispatching", "running", "reviewing", "ready_to_deploy", "deploying", "done"]) {
+      await call(`/api/tasks/${dep.id}/transition`, { method: "POST", body: JSON.stringify({ to }) });
+    }
+    const ok = await call(`/api/tasks/${blk.id}/transition`, {
+      method: "POST",
+      body: JSON.stringify({ to: "queued" }),
+    });
+    assert.equal(ok.status, 200);
+    assert.equal(ok.body.task.phase, "queued");
+  } finally {
+    srv.closeAllConnections();
+    srv.close();
+  }
+});
+
 test("dispatch without herdr returns 503", async () => {
   const res = await api("/api/tasks/2/dispatch", { method: "POST", body: "{}" });
   assert.equal(res.status, 503);
