@@ -74,9 +74,10 @@ every database entry is discoverable; an instance claims it (CAS on
   *Behavior note:* command groups now require an explicit subcommand — bare
   `faktory config` / `faktory source` print their subcommands instead of
   defaulting to `list` (use `faktory config list`).
-- ☑ **CLI command grammar** — the whole surface now reads as `<resource>
-  <verb>`: task operations moved under a `task` group (`task sync`, `task
-  list`, `task transition`) to match `config <verb>` / `source <verb>`. The
+- ☑ **CLI command grammar** — resource operations now read consistently as
+  `<resource> <verb>`: task operations moved under a `task` group (`task sync`,
+  `task list`, `task transition`) to match `config <verb>` / `source <verb>`
+  (standalone action verbs like `serve` / `tui` / `orchestrate` stay flat). The
   old flat verbs (`sync`, `tasks`, `transition`) survive as hidden, deprecated
   aliases (like `instances` / `--instance`).
 - ☐ Port allocation per instance (config `port`, collision check).

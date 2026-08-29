@@ -17,41 +17,39 @@ export function registerTask(program: Command): void {
     task.command("sync").description("pull candidates from the source into the task table"),
   ).action(syncAction);
 
-  withConfigOption(
-    task
-      .command("list")
-      .alias("ls")
-      .description("list tasks")
-      .option("--phase <phase>", "filter by lifecycle phase"),
-  ).action(listAction);
+  withConfigOption(withListOptions(task.command("list").alias("ls").description("list tasks"))).action(listAction);
 
   withConfigOption(
-    task
-      .command("transition <id> <phase>")
-      .description("move a task through the lifecycle")
-      .option("--actor <actor>", "who is making the change", "cli")
-      .option("--note <note>", "note recorded in the audit trail")
-      .option("--force", "bypass lifecycle validation (still audited)"),
+    withTransitionOptions(task.command("transition <id> <phase>").description("move a task through the lifecycle")),
   ).action(transitionAction);
 
-  // Deprecated flat aliases (pre-`task` grammar). Hidden from help, kept working.
+  // Deprecated flat aliases (pre-`task` grammar). Hidden from help, kept
+  // working. Options are applied via the same `with*Options` helpers as the
+  // real subcommands so the two can never drift apart.
   withConfigOption(
     program.command("sync", { hidden: true }).description("deprecated alias of `task sync`"),
   ).action(syncAction);
   withConfigOption(
-    program
-      .command("tasks", { hidden: true })
-      .description("deprecated alias of `task list`")
-      .option("--phase <phase>", "filter by lifecycle phase"),
+    withListOptions(program.command("tasks", { hidden: true }).description("deprecated alias of `task list`")),
   ).action(listAction);
   withConfigOption(
-    program
-      .command("transition <id> <phase>", { hidden: true })
-      .description("deprecated alias of `task transition`")
-      .option("--actor <actor>", "who is making the change", "cli")
-      .option("--note <note>", "note recorded in the audit trail")
-      .option("--force", "bypass lifecycle validation (still audited)"),
+    withTransitionOptions(
+      program.command("transition <id> <phase>", { hidden: true }).description("deprecated alias of `task transition`"),
+    ),
   ).action(transitionAction);
+}
+
+/** Options for `task list` — shared so the deprecated `tasks` alias can't drift. */
+function withListOptions(cmd: Command): Command {
+  return cmd.option("--phase <phase>", "filter by lifecycle phase");
+}
+
+/** Options for `task transition` — shared so the deprecated alias can't drift. */
+function withTransitionOptions(cmd: Command): Command {
+  return cmd
+    .option("--actor <actor>", "who is making the change", "cli")
+    .option("--note <note>", "note recorded in the audit trail")
+    .option("--force", "bypass lifecycle validation (still audited)");
 }
 
 async function syncAction(opts: { config?: string; instance?: string }): Promise<void> {

@@ -54,6 +54,7 @@ test("help hides internal and deprecated commands", async () => {
   // The flat pre-`task` verbs are deprecated aliases now, hidden from top-level help.
   assert.doesNotMatch(res.stdout, /^\s*sync\b/m);
   assert.doesNotMatch(res.stdout, /^\s*tasks\b/m);
+  assert.doesNotMatch(res.stdout, /^\s*transition\b/m);
 });
 
 test("unknown command fails with a helpful error", async () => {
@@ -83,6 +84,18 @@ test("deprecated flat task verbs still work (hidden)", async () => {
     assert.equal(res.code, 1, `${args[0]} alias should run`);
     assert.match(res.stderr, /config "ghost" does not exist/);
   }
+});
+
+test("deprecated aliases keep option parity with their `task` subcommands", async () => {
+  // The aliases share option declarations with the real subcommands (via the
+  // with*Options helpers); unknown-flag rejection proves the options exist. A
+  // valid flag must instead resolve past parsing to the config guard.
+  const withPhase = await faktory(["tasks", "--phase", "queued", "--config", "ghost"]);
+  assert.match(withPhase.stderr, /config "ghost" does not exist/);
+  const withForce = await faktory(["transition", "1", "queued", "--force", "--note", "x", "--config", "ghost"]);
+  assert.match(withForce.stderr, /config "ghost" does not exist/);
+  const bogus = await faktory(["tasks", "--nonsense", "--config", "ghost"]);
+  assert.match(bogus.stderr, /unknown option/);
 });
 
 test("config groups CRUD and settings under one verb space", async () => {
