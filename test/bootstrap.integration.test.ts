@@ -226,7 +226,7 @@ test("reattach restarts a dead tui by reusing its idle named tab", async () => {
   assert.ok(!calls.some((c) => c.includes("serve fk")), "serve is left running");
 });
 
-test("reattach relabels running components from the old unlabelled split-pane layout", async () => {
+test("reattach leaves a shared legacy tab alone (best-effort, no ambiguous relabel)", async () => {
   handler = (method, params) => {
     switch (method) {
       case "workspace.list":
@@ -257,15 +257,95 @@ test("reattach relabels running components from the old unlabelled split-pane la
 
   await bootstrapDetached(client, OPTS);
 
-  // The shared legacy tab is relabelled once (to the first running component);
-  // no new tabs are opened and nothing is (re)run.
-  const renames = requests.filter((r) => r.method === "tab.rename");
-  assert.ok(
-    renames.some((r) => r.params.tab_id === "ws1:t1" && r.params.label === TAB_LABELS.serve),
-    "relabels the legacy tab for the running serve",
-  );
+  // Two live components share t1 — it can't be split without a restart, so it
+  // is left untouched rather than relabelled to one component arbitrarily.
+  assert.ok(!requests.some((r) => r.method === "tab.rename"), "shared tab is not relabelled");
   assert.ok(!requests.some((r) => r.method === "tab.create"), "no new tabs for running components");
   assert.deepEqual(herdrCalls(), [], "running components are not restarted");
+});
+
+test("reattach relabels single-component legacy tabs (serve, tui, orchestrator)", async () => {
+  handler = (method, params) => {
+    switch (method) {
+      case "workspace.list":
+        return { workspaces: [{ workspace_id: "ws1", label: "faktory:fk" }] };
+      case "pane.list":
+        return {
+          panes: [
+            { pane_id: "ws1:p1", tab_id: "ws1:t1" },
+            { pane_id: "ws1:p2", tab_id: "ws1:t2" },
+            { pane_id: "ws1:p3", tab_id: "ws1:t3" },
+          ],
+        };
+      case "tab.list":
+        return {
+          tabs: [
+            { tab_id: "ws1:t1", label: "faktory" },
+            { tab_id: "ws1:t2", label: "faktory" },
+            { tab_id: "ws1:t3", label: "faktory" },
+          ],
+        };
+      case "pane.process_info": {
+        const cmd =
+          params.pane_id === "ws1:p1"
+            ? "node /repo/src/cli.ts serve --instance fk"
+            : params.pane_id === "ws1:p2"
+              ? "node /repo/src/cli.ts tui --instance fk"
+              : "pi";
+        return { process_info: { shell_pid: 1, foreground_processes: [{ pid: 2, cmdline: cmd }] } };
+      }
+      case "agent.list":
+        return { agents: [{ agent_name: "faktory-fk-orchestrator", pane_id: "ws1:p3" }] };
+      default:
+        return {};
+    }
+  };
+
+  await bootstrapDetached(client, OPTS);
+
+  const renames = new Map(
+    requests.filter((r) => r.method === "tab.rename").map((r) => [r.params.tab_id, r.params.label]),
+  );
+  assert.equal(renames.get("ws1:t1"), TAB_LABELS.serve);
+  assert.equal(renames.get("ws1:t2"), TAB_LABELS.tui);
+  assert.equal(renames.get("ws1:t3"), TAB_LABELS.orchestrator);
+  assert.ok(!requests.some((r) => r.method === "tab.create"), "no new tabs for running components");
+  assert.deepEqual(herdrCalls(), [], "running components are not restarted");
+});
+
+test("reattach opens a fresh named tab when a dead component has no labelled tab", async () => {
+  handler = (method, params) => {
+    switch (method) {
+      case "workspace.list":
+        return { workspaces: [{ workspace_id: "ws1", label: "faktory:fk" }] };
+      case "pane.list":
+        return { panes: [{ pane_id: "ws1:p1", tab_id: "ws1:t1" }] };
+      case "tab.list":
+        return { tabs: [{ tab_id: "ws1:t1", label: TAB_LABELS.serve }] };
+      case "pane.process_info":
+        // Only serve is alive; there is no tui tab to reuse.
+        return {
+          process_info: {
+            shell_pid: 1,
+            foreground_processes: [{ pid: 2, cmdline: "node /repo/src/cli.ts serve --instance fk" }],
+          },
+        };
+      case "tab.create":
+        return { tab: { tab_id: "ws1:t2" }, root_pane: { pane_id: "ws1:p2" } };
+      case "agent.list":
+        return { agents: [{ agent_name: "faktory-fk-orchestrator" }] };
+      default:
+        return {};
+    }
+  };
+
+  const result = await bootstrapDetached(client, OPTS);
+
+  const created = requests.filter((r) => r.method === "tab.create");
+  assert.equal(created.length, 1);
+  assert.equal(created[0]!.params.label, TAB_LABELS.tui);
+  assert.equal(result.tuiPaneId, "ws1:p2");
+  assert.ok(herdrCalls().some((c) => c.includes("pane run ws1:p2") && c.includes("tui --instance fk")));
 });
 
 test("adopt branch resolves the root tab id via pane.get when pane.list omits it", async () => {

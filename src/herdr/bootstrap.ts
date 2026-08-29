@@ -117,9 +117,15 @@ async function runInPane(paneId: string, command: string): Promise<void> {
 }
 
 async function agentExists(herdr: HerdrClient, name: string): Promise<boolean> {
+  return !!(await findAgent(herdr, name));
+}
+
+/** Locate a named agent and the pane it runs in, or undefined if not present. */
+async function findAgent(herdr: HerdrClient, name: string): Promise<{ paneId?: string } | undefined> {
   const result = await herdr.request<any>("agent.list", {});
   const agents: any[] = result?.agents ?? [];
-  return agents.some((a) => (a.agent_name ?? a.name) === name);
+  const found = agents.find((a) => (a.agent_name ?? a.name) === name);
+  return found ? { paneId: found.pane_id ?? found.id } : undefined;
 }
 
 interface PaneProcess {
@@ -138,7 +144,7 @@ async function paneProcess(herdr: HerdrClient, paneId: string): Promise<PaneProc
   };
 }
 
-/** A freshly split pane's shell takes a moment to come up; agent.start rejects a non-idle pane. */
+/** A freshly opened tab's pane shell takes a moment to come up; agent.start rejects a non-idle pane. */
 async function waitForIdleShell(herdr: HerdrClient, paneId: string, timeoutMs = 15_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -224,9 +230,9 @@ export function isServeProcess(cmdline: string): boolean {
 }
 
 /**
- * Reconcile an existing workspace: tabs are preserved; a dead component is
- * restarted by reusing its same-labelled idle tab, or opening a fresh named
- * tab when none can be reused.
+ * Reconcile an existing workspace: running components are left in place (their
+ * tab relabelled to match when it uniquely owns them), and a dead component is
+ * restarted by reusing its same-labelled tab or opening a fresh named one.
  */
 async function reattachWorkspace(
   herdr: HerdrClient,
@@ -240,24 +246,42 @@ async function reattachWorkspace(
   const processes = await Promise.all(panes.map((p) => paneProcess(herdr, p.pane_id ?? p.id)));
   const paneId = (p: any): string => p.pane_id ?? p.id;
   const tabId = (t: any): string => t.tab_id ?? t.id;
-  const tabOfPane = new Map(panes.map((p) => [paneId(p), p.tab_id]));
-  const labelOfTab = new Map(tabs.map((t) => [tabId(t), t.label]));
+  const tabOfPane = new Map<string, string>(panes.map((p) => [paneId(p), p.tab_id]));
+  const idleByPane = new Map(processes.map((p) => [p.paneId, p.idleShell]));
+  const labelOfTab = new Map<string, string>(tabs.map((t) => [tabId(t), t.label]));
 
-  // Ensure the tab that owns a running component's pane carries its label
-  // (migrates workspaces from the old split-pane layout, where all components
-  // shared one unlabelled tab).
+  const agentName = orchestratorAgentName(opts.prefix);
+  const agent = opts.agent ? await findAgent(herdr, agentName) : undefined;
+
+  // Panes that already host a Faktory component; used to detect legacy tabs
+  // where several components share one tab (they can't be separated without a
+  // restart, so we leave such tabs alone rather than relabel ambiguously).
+  const componentPanes = new Set<string>(
+    processes.filter((p) => isServeProcess(p.cmdline) || isTuiProcess(p.cmdline)).map((p) => p.paneId),
+  );
+  if (agent?.paneId) componentPanes.add(agent.paneId);
+
+  // Label the tab that owns a running component's pane — but only when that
+  // component uniquely owns the tab (migrates the common one-tab-per-component
+  // case; shared legacy tabs are left as-is, best-effort).
   const ensureLabelled = async (pid: string, tabLabel: string): Promise<void> => {
     const owning = tabOfPane.get(pid);
-    if (owning && labelOfTab.get(owning) !== tabLabel) await renameTab(herdr, owning, tabLabel);
+    if (!owning) return;
+    const shared = [...componentPanes].some((other) => other !== pid && tabOfPane.get(other) === owning);
+    if (shared || labelOfTab.get(owning) === tabLabel) return;
+    await renameTab(herdr, owning, tabLabel);
+    labelOfTab.set(owning, tabLabel);
   };
 
   // Restart a dead component into its own named tab: reuse the same-labelled
-  // tab if one exists (never duplicate a label), else open a fresh one.
+  // tab if one exists (never duplicate a label), preferring an idle pane in it;
+  // otherwise open a fresh named tab.
   const claimTab = async (tabLabel: string): Promise<string> => {
     const existing = tabs.find((t) => t.label === tabLabel);
     if (existing) {
-      const own = panes.find((p) => p.tab_id === tabId(existing));
-      if (own) return paneId(own);
+      const inTab = panes.filter((p) => p.tab_id === tabId(existing));
+      const pick = inTab.find((p) => idleByPane.get(paneId(p))) ?? inTab[0];
+      if (pick) return paneId(pick);
     }
     return createTab(herdr, workspaceId, tabLabel, opts.repoCwd);
   };
@@ -279,10 +303,10 @@ async function reattachWorkspace(
     }
   }
   if (opts.agent) {
-    const agentName = orchestratorAgentName(opts.prefix);
-    if (await agentExists(herdr, agentName)) {
+    if (agent) {
       result.agentName = agentName;
       result.agentAlreadyRunning = true;
+      if (agent.paneId) await ensureLabelled(agent.paneId, TAB_LABELS.orchestrator);
     } else {
       result.agentPaneId = await claimTab(TAB_LABELS.orchestrator);
       const started = await startOrchestrator(herdr, result.agentPaneId, opts);
