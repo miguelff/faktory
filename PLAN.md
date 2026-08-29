@@ -71,6 +71,9 @@ every database entry is discoverable; an instance claims it (CAS on
   command); self-documenting help, non-interactive by default (bare `faktory`
   lists subcommands), colon commands made consistent (`source set-notion`,
   `config get`/`config set`). Adding a command = one file + one register call.
+  *Behavior note:* command groups now require an explicit subcommand — bare
+  `faktory config` / `faktory source` print their subcommands instead of
+  defaulting to `list` (use `faktory config list`).
 - ☐ Port allocation per instance (config `port`, collision check).
 - ☐ Auth on the HTTP API (localhost token header) before any non-localhost use.
 - ☐ Graceful shutdown of `serve` (close SQLite, unsubscribe).
