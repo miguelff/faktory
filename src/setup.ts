@@ -1,23 +1,50 @@
 import * as readline from "node:readline/promises";
 import { stdin, stdout } from "node:process";
+import { createServer } from "node:http";
+import { execFile } from "node:child_process";
 import { ensureInstanceDir, instanceRef } from "./core/instance.ts";
 import { getSecret, openDb, setConfig, setSecret } from "./core/db.ts";
 import { createSource } from "./sources/factory.ts";
-import { tagForRole } from "./core/lifecycle.ts";
-import { TAG_ROLES } from "./core/types.ts";
+import { FAKTORY_STATUSES } from "./core/lifecycle.ts";
+import { FAKTORY_OWNED_AT, FAKTORY_OWNED_BY, FAKTORY_STATUS } from "./sources/notion.ts";
 
 /**
- * `faktory setup` — interactive onboarding for humans.
- * Walks through: instance → Notion token → database picker → candidacy →
- * status/priority mapping → repo & agent defaults. Everything has a default;
- * Enter accepts it. Ctrl+C aborts safely at any point (nothing half-written
- * until the final confirmation).
+ * Terminal setup wizard. Produces one config under ~/.faktory/<slug>/ (its own
+ * SQLite state database, secrets included), tagged with the config name.
+ * Serve runs it automatically when no config exists; `faktory setup` re-runs
+ * it standalone. Everything has a default; Enter accepts it; Ctrl+C aborts
+ * safely (nothing half-written until the final confirmation).
  */
 const NOTION = "https://api.notion.com/v1";
 const B = (s: string) => `\u001b[1m${s}\u001b[22m`;
 const DIM = (s: string) => `\u001b[2m${s}\u001b[22m`;
 const OK = (s: string) => `\u001b[32m${s}\u001b[39m`;
 const ERR = (s: string) => `\u001b[31m${s}\u001b[39m`;
+
+export interface Prompter {
+  ask(q: string, def?: string): Promise<string>;
+  pick<T>(label: string, items: T[], show: (t: T) => string, defIdx?: number): Promise<T>;
+  close(): void;
+}
+
+export function createPrompter(): Prompter {
+  const rl = readline.createInterface({ input: stdin, output: stdout });
+  const ask = async (q: string, def?: string): Promise<string> => {
+    const a = (await rl.question(`  ${q}${def ? DIM(` (${def})`) : ""} `)).trim();
+    return a || def || "";
+  };
+  const pick = async <T>(label: string, items: T[], show: (t: T) => string, defIdx = 0): Promise<T> => {
+    console.log(`\n  ${B(label)}`);
+    items.forEach((it, i) => console.log(`    ${i + 1}. ${show(it)}${i === defIdx ? DIM("  ← default") : ""}`));
+    while (true) {
+      const a = await ask("choose a number", String(defIdx + 1));
+      const i = Number(a) - 1;
+      if (items[i] !== undefined) return items[i]!;
+      console.log(ERR("  not a valid choice, try again"));
+    }
+  };
+  return { ask, pick, close: () => rl.close() };
+}
 
 async function notion(token: string, path: string, init?: RequestInit): Promise<any> {
   const res = await fetch(`${NOTION}${path}`, {
@@ -33,101 +60,206 @@ async function notion(token: string, path: string, init?: RequestInit): Promise<
   return body;
 }
 
-export async function runSetup(): Promise<void> {
-  const rl = readline.createInterface({ input: stdin, output: stdout });
-  const ask = async (q: string, def?: string): Promise<string> => {
-    const a = (await rl.question(`  ${q}${def ? DIM(` (${def})`) : ""} `)).trim();
-    return a || def || "";
+/**
+ * Schema for a backlog database Faktory creates itself: title, priority, and
+ * the instance-agnostic ownership columns (many instances can share one
+ * database; entries are claimed via faktory_owned_by).
+ */
+export function backlogDatabaseProperties(): Record<string, unknown> {
+  return {
+    Name: { title: {} },
+    [FAKTORY_STATUS]: { select: { options: FAKTORY_STATUSES.map((name) => ({ name })) } },
+    [FAKTORY_OWNED_BY]: { rich_text: {} },
+    [FAKTORY_OWNED_AT]: { date: {} },
+    Priority: { number: { format: "number" } },
   };
-  const pick = async <T>(label: string, items: T[], show: (t: T) => string, defIdx = 0): Promise<T> => {
-    console.log(`\n  ${B(label)}`);
-    items.forEach((it, i) => console.log(`    ${i + 1}. ${show(it)}${i === defIdx ? DIM("  ← default") : ""}`));
-    while (true) {
-      const a = await ask("choose a number", String(defIdx + 1));
-      const i = Number(a) - 1;
-      if (items[i]) return items[i]!;
-      console.log(ERR("  not a valid choice, try again"));
-    }
-  };
+}
 
+export function notionOAuthAvailable(): boolean {
+  return !!(process.env.FAKTORY_NOTION_CLIENT_ID && process.env.FAKTORY_NOTION_CLIENT_SECRET);
+}
+
+/**
+ * OAuth against Notion's public-integration flow: open the browser, catch the
+ * redirect on a localhost callback, exchange the code for an access token.
+ * Requires FAKTORY_NOTION_CLIENT_ID / FAKTORY_NOTION_CLIENT_SECRET.
+ */
+export async function notionOAuthToken(): Promise<string> {
+  const clientId = process.env.FAKTORY_NOTION_CLIENT_ID!;
+  const clientSecret = process.env.FAKTORY_NOTION_CLIENT_SECRET!;
+  let redirectUri = "";
+  const code = await new Promise<string>((resolve, reject) => {
+    const server = createServer((req, res) => {
+      const url = new URL(req.url ?? "/", "http://localhost");
+      if (url.pathname !== "/callback") {
+        res.writeHead(404).end();
+        return;
+      }
+      const code = url.searchParams.get("code");
+      const error = url.searchParams.get("error");
+      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(
+        code
+          ? "<h3>⚙ faktory is connected to Notion — you can close this tab.</h3>"
+          : `<h3>authorization failed: ${error ?? "no code returned"}</h3>`,
+      );
+      server.close();
+      code ? resolve(code) : reject(new Error(`notion oauth failed: ${error ?? "no code returned"}`));
+    });
+    server.listen(0, "127.0.0.1", () => {
+      redirectUri = `http://localhost:${(server.address() as any).port}/callback`;
+      const authUrl =
+        `${NOTION}/oauth/authorize?client_id=${encodeURIComponent(clientId)}` +
+        `&response_type=code&owner=user&redirect_uri=${encodeURIComponent(redirectUri)}`;
+      console.log(`\n  Opening the browser to authorize faktory…\n  ${DIM(authUrl)}`);
+      if (process.platform === "darwin") execFile("open", [authUrl], () => {});
+    });
+    setTimeout(() => {
+      server.close();
+      reject(new Error("notion oauth timed out after 5 minutes"));
+    }, 300_000).unref();
+  });
+  const res = await fetch(`${NOTION}/oauth/token`, {
+    method: "POST",
+    headers: {
+      Authorization: `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString("base64")}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ grant_type: "authorization_code", code, redirect_uri: redirectUri }),
+  });
+  const body: any = await res.json();
+  if (!res.ok || !body.access_token) throw new Error(body?.error_description ?? body?.error ?? `Notion oauth ${res.status}`);
+  return body.access_token as string;
+}
+
+async function authenticateNotion(ui: Prompter): Promise<string> {
+  const envToken = process.env.NOTION_TOKEN;
+  if (notionOAuthAvailable()) {
+    const OAUTH = "Sign in with Notion in the browser (OAuth)";
+    const PASTE = "Paste an internal integration token";
+    const method = await ui.pick("How should faktory authenticate with Notion?", [OAUTH, PASTE], (s) => s);
+    if (method === OAUTH) return notionOAuthToken();
+  } else {
+    console.log(
+      DIM("\n  (OAuth needs FAKTORY_NOTION_CLIENT_ID / FAKTORY_NOTION_CLIENT_SECRET — falling back to a token.)"),
+    );
+  }
+  const token = await ui
+    .ask("Notion integration token?", envToken ? `${envToken.slice(0, 8)}… (from env)` : undefined)
+    .then((t) => (t.endsWith("(from env)") ? envToken! : t));
+  if (!token) throw new Error("A Notion token is required (create one at notion.so/my-integrations).");
+  return token;
+}
+
+interface PickedDatabase {
+  id: string;
+  title: string;
+  /** Set when faktory created the database and therefore knows the schema. */
+  created?: boolean;
+}
+
+async function pickOrCreateDatabase(ui: Prompter, token: string): Promise<PickedDatabase> {
+  console.log(DIM("\n  Looking up databases shared with your integration…"));
+  const search = await notion(token, "/search", {
+    method: "POST",
+    body: JSON.stringify({ filter: { value: "database", property: "object" }, page_size: 25 }),
+  });
+  const dbs: PickedDatabase[] = (search.results as any[]).map((d) => ({
+    id: d.id as string,
+    title: (d.title ?? []).map((t: any) => t.plain_text).join("") || "(untitled)",
+  }));
+  const CREATE: PickedDatabase = { id: "", title: "(create a new backlog database)" };
+  const choice = dbs.length
+    ? await ui.pick("Which database is the backlog?", [...dbs, CREATE], (d) => (d.id ? `${d.title} ${DIM(d.id)}` : d.title))
+    : CREATE;
+  if (choice.id) return choice;
+
+  if (!dbs.length) console.log(DIM("  No databases are shared with the integration yet — let's create one."));
+  const pages = await notion(token, "/search", {
+    method: "POST",
+    body: JSON.stringify({ filter: { value: "page", property: "object" }, page_size: 25 }),
+  });
+  const parents = (pages.results as any[]).map((p) => ({
+    id: p.id as string,
+    title:
+      Object.values<any>(p.properties ?? {})
+        .find((prop: any) => prop.type === "title")
+        ?.title?.map((t: any) => t.plain_text)
+        .join("") || "(untitled page)",
+  }));
+  if (!parents.length)
+    throw new Error("No pages visible to host the database. Share a page with the integration in Notion (••• → Connections).");
+  const parent = await ui.pick("Which page should host the new database?", parents, (p) => `${p.title} ${DIM(p.id)}`);
+  const title = await ui.ask("Database name?", "Faktory Backlog");
+  const created = await notion(token, "/databases", {
+    method: "POST",
+    body: JSON.stringify({
+      parent: { type: "page_id", page_id: parent.id },
+      title: [{ type: "text", text: { content: title } }],
+      properties: backlogDatabaseProperties(),
+    }),
+  });
+  console.log(OK(`  ✔ created database "${title}"`));
+  return { id: created.id, title, created: true };
+}
+
+export interface SetupOptions {
+  /** Config name; prompted for when absent. */
+  name?: string;
+}
+
+/** Runs the wizard and returns the slug of the saved config. */
+export async function runSetup(opts: SetupOptions = {}): Promise<string> {
+  const ui = createPrompter();
   try {
     console.log(`\n${B("⚙ faktory setup")} ${DIM("— Enter accepts the default, Ctrl+C aborts")}\n`);
 
-    // 1. Instance
-    const name = await ask("Instance name?", "main");
+    // 1. Config name → ~/.faktory/<slug>/
+    const name = opts.name ?? (await ui.ask("Config name?", "main"));
     const ref = instanceRef(name);
-    console.log(DIM(`  → tag prefix will be ${B(ref.prefix)}, state in ${ref.dir}`));
+    console.log(DIM(`  → owner id will be ${B(ref.prefix)}, state in ${ref.dir}`));
 
-    // 2. Token
-    const envToken = process.env.NOTION_TOKEN;
-    const token = await ask("Notion integration token?", envToken ? `${envToken.slice(0, 8)}… (from env)` : undefined).then(
-      (t) => (t.endsWith("(from env)") ? envToken! : t),
-    );
-    if (!token) throw new Error("A Notion token is required (create one at notion.so/my-integrations).");
+    // 2. Notion auth (OAuth when client credentials are present) + verification
+    const token = await authenticateNotion(ui);
+    const me = await notion(token, "/users/me");
+    console.log(OK(`  ✔ authenticated as ${me?.name ?? me?.bot?.owner?.type ?? "integration"}`));
 
-    // 3. Database picker (searches everything shared with the integration)
-    console.log(DIM("\n  Looking up databases shared with your integration…"));
-    const search = await notion(token, "/search", {
-      method: "POST",
-      body: JSON.stringify({ filter: { value: "database", property: "object" }, page_size: 25 }),
-    });
-    const dbs = (search.results as any[]).map((d) => ({
-      id: d.id as string,
-      title: (d.title ?? []).map((t: any) => t.plain_text).join("") || "(untitled)",
-    }));
-    if (!dbs.length) throw new Error("No databases visible. Share one with the integration in Notion (••• → Connections).");
-    const db = await pick("Which database is the backlog?", dbs, (d) => `${d.title} ${DIM(d.id)}`);
+    // 3. Backlog database: pick an existing one or create it. Every entry in
+    //    it is discoverable; instances claim entries via faktory_owned_by.
+    const db = await pickOrCreateDatabase(ui, token);
 
-    // 4. Candidacy: property + value
-    const schema = await notion(token, `/databases/${db.id}`);
-    const props = Object.entries<any>(schema.properties);
-    const multiSelects = props.filter(([, p]) => p.type === "multi_select").map(([n]) => n);
-    if (!multiSelects.length) throw new Error("The database has no multi_select property to use for tags.");
-    const candidateProperty = await pick(
-      "Which property marks candidates (tags live here)?",
-      multiSelects,
-      (n) => n,
-      Math.max(0, multiSelects.indexOf("Tags")),
-    );
-    const candidateValue = await ask("Tag value that marks an issue as ready for pickup?", `${ref.prefix}-execute`);
+    // 4. Priority mapping (a created database always has "Priority")
+    let priorityProperty: string | undefined = "Priority";
+    if (!db.created) {
+      const schema = await notion(token, `/databases/${db.id}`);
+      const numberProps = Object.entries<any>(schema.properties)
+        .filter(([, p]) => p.type === "number")
+        .map(([n]) => n);
+      priorityProperty = numberProps.length
+        ? await ui.pick("Priority property?", [...numberProps, "(none)"], (n) => n, Math.max(0, numberProps.indexOf("Priority")))
+        : "(none)";
+      if (priorityProperty === "(none)") priorityProperty = undefined;
+    }
 
-    // 5. Status + priority mapping
-    const statusProps = props.filter(([, p]) => p.type === "status" || p.type === "select").map(([n]) => n);
-    const statusProperty = statusProps.length
-      ? await pick("Which property is the human-facing status?", [...statusProps, "(none)"], (n) => n,
-          Math.max(0, statusProps.indexOf("Status")))
-      : "(none)";
-    const numberProps = props.filter(([, p]) => p.type === "number").map(([n]) => n);
-    const priorityProperty = numberProps.length
-      ? await pick("Priority property?", [...numberProps, "(none)"], (n) => n, Math.max(0, numberProps.indexOf("Priority")))
-      : "(none)";
+    // 5. Dispatch defaults
+    const repoCwd = await ui.ask("Repository Faktory should dispatch work in?", process.cwd());
+    const agentKind = await ui.ask("Agent harness for /kickoff?", "pi");
+    const port = await ui.ask("Port for the web board / API?", "4600");
 
-    // 6. Dispatch defaults
-    const repoCwd = await ask("Repository Faktory should dispatch work in?", process.cwd());
-    const agentKind = await ask("Agent harness for /kickoff?", "pi");
-    const port = await ask("Port for the web board / API?", "4600");
-
-    // 7. Confirm & write
+    // 6. Confirm & write
     console.log(`\n  ${B("Summary")}
-    instance   ${ref.slug} ${DIM(`(prefix ${ref.prefix})`)}
-    database   ${db.title}
-    candidacy  ${candidateProperty} contains "${candidateValue}"
-    status     ${statusProperty}    priority ${priorityProperty}
+    config     ${ref.slug} ${DIM(`(owner id ${ref.prefix}, state ${ref.dir})`)}
+    database   ${db.title}${db.created ? DIM(" (new)") : ""}
+    ownership  ${FAKTORY_STATUS} / ${FAKTORY_OWNED_BY} / ${FAKTORY_OWNED_AT} ${DIM("(added if missing)")}
+    priority   ${priorityProperty ?? "(none)"}
     dispatch   ${agentKind} in ${repoCwd}
     board      http://127.0.0.1:${port}\n`);
-    if ((await ask("Save? (y/n)", "y")).toLowerCase() !== "y") throw new Error("aborted — nothing saved");
+    if ((await ui.ask("Save? (y/n)", "y")).toLowerCase() !== "y") throw new Error("aborted — nothing saved");
 
     ensureInstanceDir(ref);
     const dbh = openDb(ref.dbPath);
     setSecret(dbh, "notion.token", token);
-    const config = {
-      databaseId: db.id,
-      candidateProperty,
-      candidateValue,
-      statusProperty: statusProperty === "(none)" ? undefined : statusProperty,
-      tagsProperty: candidateProperty,
-      priorityProperty: priorityProperty === "(none)" ? undefined : priorityProperty,
-    };
+    const config = { databaseId: db.id, priorityProperty };
     dbh
       .prepare(
         "INSERT INTO sources (id, kind, config) VALUES ('primary','notion',?) ON CONFLICT(id) DO UPDATE SET kind='notion', config=excluded.config",
@@ -141,16 +273,15 @@ export async function runSetup(): Promise<void> {
       { id: "primary", kind: "notion", config: config as unknown as Record<string, unknown> },
       { getSecret: (k) => getSecret(dbh, k), prefix: ref.prefix },
     );
-    if (source.ensureTags) {
-      const created = await source.ensureTags([...new Set([candidateValue, ...TAG_ROLES.map((r) => tagForRole(ref.prefix, r))])]);
-      if (created.length) console.log(DIM(`  provisioned tag option(s): ${created.join(", ")}`));
+    if (source.ensureProperties) {
+      const created = await source.ensureProperties();
+      if (created.length) console.log(DIM(`  added ownership propert${created.length === 1 ? "y" : "ies"}: ${created.join(", ")}`));
     }
+    dbh.close();
 
-    console.log(`\n  ${OK("✔ done.")} Next:
-    bin/faktory serve --instance ${ref.slug}      ${DIM(`→ http://127.0.0.1:${port}`)}
-    bin/faktory tui   --instance ${ref.slug}
-    Tag an issue with ${B(candidateValue)} in Notion, then press Sync.\n`);
+    console.log(`\n  ${OK("✔ done.")} ${DIM(`bin/faktory serve ${ref.slug} → http://127.0.0.1:${port}`)}\n`);
+    return ref.slug;
   } finally {
-    rl.close();
+    ui.close();
   }
 }
