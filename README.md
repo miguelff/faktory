@@ -1,10 +1,14 @@
 # ⚙ Faktory
 
 Local orchestration for coding agents. Faktory watches an issue backlog
-(Notion today; Jira/GitHub behind the same abstraction), dispatches issues to
-coding agents running inside [herdr](https://herdr.dev) via `/kickoff`, tracks
-the whole lifecycle (dispatch → execution → review → deploy) in SQLite, and
-mirrors progress back to the source through faktory-managed ownership columns.
+(Notion today; Jira/GitHub behind the same abstraction) and runs a
+**deterministic engine loop** that moves each task through a pipeline
+(Backlog → To shape → To execute → To review → Ready → Done), dispatching a
+coding agent inside [herdr](https://herdr.dev) per stage. Agents do the work and
+report back through a validated **inbox** (channel-style); the loop owns every
+state transition, lock, and source annotation. Progress is mirrored back to the
+source through faktory-managed ownership columns — Notion is the remote board,
+the TUI kanban is the local one.
 
 Read `docs/DESIGN.md` for the architecture and `AGENTS.md` if you are an agent
 evolving this codebase.
@@ -56,12 +60,13 @@ Optional per-config settings (stored in the config's state DB) are read/written
 with `config get`/`config set`:
 
 ```sh
-bin/faktory config set repoCwd /path/to/repo --config omnia  # where /kickoff worktrees are cut
-bin/faktory config set agentKind pi          --config omnia  # harness that runs /kickoff
+bin/faktory config set repoCwd /path/to/repo --config omnia  # where task worktrees are cut
+bin/faktory config set agentKind pi          --config omnia  # harness stage agents run as
+bin/faktory config set wip 3                 --config omnia  # tasks kept in the actionable lanes
 bin/faktory config get                       --config omnia  # print all settings
 ```
 
-Keys: `repoCwd`, `agentKind`, `orchestratorKind`, `port`, `herdrSession`.
+Keys: `repoCwd`, `agentKind`, `port`, `herdrSession`, `wip` (actionable-lane WIP target, default 3).
 
 ## Collaborate
 
@@ -109,20 +114,15 @@ bin/faktory serve omnia        # a specific config (equivalent: --config omnia)
 
 `serve` first makes sure a config exists (running the setup wizard if not, or
 letting you pick when several exist), then checks/installs external
-dependencies, starts the web board + API in-process, and bootstraps the whole
+dependencies, starts the API + **engine loop** in-process, and bootstraps the
 workbench. From a plain terminal it opens a new terminal window attached to a
 herdr session **dedicated to that config** (`faktory-<slug>`, isolated from
-every other config's session; `--session`/`herdrSession` config to change)
-and sets up a `faktory:<instance>` workspace there; from
-inside a herdr pane it splits the panes around itself. Either way you get a
-TUI pane and an **orchestrator agent loop** — an agent (configurable harness,
-`orchestratorKind` config, pi by default) that follows
-`skills/faktory-orchestrator/SKILL.md` and continuously loops over the task
-state machine: sync → queue discovered → dispatch queued → monitor running →
-judge reviews. Re-running `serve` against a live session preserves panes and
-restarts the loop only if its agent died. Opt out with `--headless`,
-`--no-tui`, or `--no-agent`; `bin/faktory orchestrate` (re)starts just the
-agent loop.
+every other config's session; `--session`/`herdrSession` config to change) and
+sets up a `faktory:<instance>` workspace there with two tabs — **serve** (the
+API + engine loop) and **board** (the kanban TUI). There is no orchestrator
+agent: the loop is deterministic engine code. Re-running `serve` against a live
+session preserves panes and restarts only what died. Opt out of the board with
+`--no-board`, or run API + loop only with `--headless`.
 
 Other commands:
 
@@ -147,13 +147,15 @@ Deleting a config removes its state under `~/.faktory/<slug>/` (SQLite DB and
 secrets); it leaves Notion ownership tags on already-claimed items untouched.
 The `serve` picker can also delete a config when several exist.
 
-- **Web board**: http://127.0.0.1:4600 — sync, queue, dispatch, watch phases.
-- **HTTP API**: `docs/API.md` — same control plane, used by orchestrator agents.
-- **TUI**: j/k navigate, enter for detail + audit history, `t` to transition,
-  SHIFT+letter to force-repair a stuck task, `s` sync, `q` quit.
-- **Dispatch** requires running inside herdr (`HERDR_SOCKET_PATH` set): it
-  creates a git worktree (`faktory-<slug>/<task>-<title>` branch), starts an
-  agent in the new workspace pane, and prompts it with `/kickoff <issue-url>`.
+- **Notion** is the remote board: `faktory_status` mirrors every phase.
+- **HTTP API**: `docs/API.md` — thin board/feed + the inbox agents report to.
+- **TUI kanban**: h/l move between columns, j/k between cards, enter for detail
+  + audit/inbox history, `t` to transition, SHIFT+letter to force-repair, `d`
+  toggle Done, `a` toggle Archived, `s` sync, `q` quit. Cards show `●` working
+  / `○` waiting.
+- **Dispatch** requires running inside herdr (`HERDR_SOCKET_PATH` set): the loop
+  gives each task its own herdr space (`faktory-<slug>/<task>-<title>` branch),
+  a tab per pipeline stage, and prompts each stage agent with its stage prompt.
 
 ## CLI
 
@@ -173,14 +175,14 @@ Every config-scoped command takes `-c, --config <name>` (the deprecated
 
 | Command | What it does |
 |---------|--------------|
-| `serve [config]` | set up if needed, then start everything (API, board, herdr, TUI, orchestrator) |
+| `serve [config]` | set up if needed, then start everything (API, engine loop, herdr, kanban board) |
 | `setup` | run the setup wizard standalone |
 | `config list\|create\|delete` | manage configs (named orchestrations) |
 | `config get\|set` | read/write a config's settings |
 | `source set-notion` | configure the Notion source non-interactively |
 | `task sync\|list\|transition` | pull candidates, list tasks, move a task through the lifecycle |
-| `tui` | terminal inspector / repair |
-| `orchestrate` | (re)start just the orchestrator agent loop |
+| `tui` | terminal kanban board / inspector / repair |
+| `report <id>` | send a typed inbox message (agent → loop channel) |
 | `invite` / `join` | share / link a datasource across operators |
 
 Adding a command is one file under `src/cli/commands/` plus one register call
@@ -189,9 +191,13 @@ in `src/cli/index.ts` (see `AGENTS.md` → "CLI structure").
 ## Lifecycle
 
 ```
-discovered → queued → dispatching → running → reviewing → ready_to_deploy → deploying → done
-                          ↘ failed (retry → queued)   ↘ blocked (needs a human)
+backlog → to_shape → to_execute → to_review → ready → done
+            ↘ blocked (needs a human; resumes its lane)   ↘ archived
 ```
+
+The three **actionable lanes** (`to_shape`, `to_execute`, `to_review`) are the
+loop's inboxes; a task in a lane is either being worked by a stage agent or
+waiting for the loop to dispatch one. The loop keeps the lanes fed up to `wip`.
 
 Every transition is validated against the state machine and recorded in the
 `task_events` audit log. Illegal jumps are rejected; repairs are possible but

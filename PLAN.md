@@ -19,6 +19,18 @@ every database entry is discoverable; an instance claims it (CAS on
 - ☑ macOS installer (`install.sh`), orchestrator skill, vendored design skills
 - ☑ 31 unit/integration tests
 
+## v1.5 — programmatic engine loop (shipped)
+
+- ☑ **Replace the prompt-driven orchestrator agent with a deterministic engine
+  loop** (`src/core/loop.ts`, run in `serve`). New pipeline
+  `backlog → to_shape → to_execute → to_review → ready → done` (+ blocked,
+  archived). Typed **inbox** channel (`faktory report` → API) for agent→loop
+  messages; loop validates origin + legality, reconciles herdr state, never
+  infers completion from silence. Per-task herdr space, one tab per stage;
+  archive closes the space. **TUI kanban board + action feed.** Web UI removed
+  (Notion is the remote board). This subsumes the v1 reconciler/auto-dispatch
+  and the v2 orchestrator-agent bootstrap items below.
+
 ## v1 — close the loop (priority order)
 
 1. ☐ **Reconciler in `serve`** — subscribe to `pane.agent_status_changed` /
@@ -41,10 +53,10 @@ every database entry is discoverable; an instance claims it (CAS on
 4. ☐ **Notion OAuth flow in the web UI** — public integration; store tokens in
    the instance secret store; datasource picker replaces manual
    `source:set-notion` flags. (CLI-side OAuth shipped with the wizard.)
-5. ☐ **Auto-dispatch policy (optional)** — engine tick: promote `discovered`
-   candidates to `queued` (priority order, `Blocked By` relation gate) and
-   dispatch up to `concurrency` (config, default 2). Off by default; the
-   orchestrator agent remains the primary brain.
+5. ☑ **Auto-dispatch policy** — superseded by the engine loop: it promotes
+   `backlog` (priority order) to keep the actionable lanes fed up to `wip`
+   (config, default 3) and dispatches a stage agent per lane. (A `Blocked By`
+   relation gate is still a future refinement.)
 6. ☐ **Deploy hook** — per-instance `deployCommand`; `ready_to_deploy →
    deploying → done/failed` runs it in a herdr pane with output captured.
 

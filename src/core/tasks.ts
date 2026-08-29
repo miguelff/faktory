@@ -1,5 +1,5 @@
 import type { DatabaseSync } from "node:sqlite";
-import type { Phase, Task, TaskEvent, WorkItem } from "./types.ts";
+import type { Phase, Stage, Task, TaskEvent, TaskStage, WorkItem } from "./types.ts";
 import { canTransition } from "./lifecycle.ts";
 
 /** Task repository + the single legal way to change a task's phase. */
@@ -16,6 +16,9 @@ function rowToTask(r: Record<string, unknown>): Task {
     workspaceId: r.workspace_id as string | null,
     paneId: r.pane_id as string | null,
     agentName: r.agent_name as string | null,
+    stage: (r.stage as Stage | null) ?? null,
+    dispatchedAt: (r.dispatched_at as string | null) ?? null,
+    resumePhase: (r.resume_phase as Phase | null) ?? null,
     branch: r.branch as string | null,
     prUrl: r.pr_url as string | null,
     error: r.error as string | null,
@@ -27,8 +30,15 @@ function rowToTask(r: Record<string, unknown>): Task {
 export class TaskStore {
   constructor(private readonly db: DatabaseSync) {}
 
-  /** Insert-or-refresh a task from a source candidate. New tasks start `discovered`. */
-  upsertFromItem(sourceId: string, item: WorkItem): Task {
+  /**
+   * Insert-or-refresh a task from a source candidate. A *new* task adopts
+   * `initialPhase` — the phase read back from the datasource (the source of
+   * truth), so a rebuilt/wiped local projection recovers mid-pipeline state
+   * rather than resetting everything to backlog. Existing rows keep their
+   * projected phase (owned tasks only ever move via datasource-first
+   * transitions, so the projection already matches the datasource).
+   */
+  upsertFromItem(sourceId: string, item: WorkItem, initialPhase: Phase = "backlog"): Task {
     const existing = this.bySourceItem(sourceId, item.id);
     if (existing) {
       this.db
@@ -39,12 +49,10 @@ export class TaskStore {
       return this.byId(existing.id)!;
     }
     const res = this.db
-      .prepare(
-        "INSERT INTO tasks (source_id, item_id, title, url, phase, priority) VALUES (?, ?, ?, ?, 'discovered', ?)",
-      )
-      .run(sourceId, item.id, item.title, item.url, item.priority);
+      .prepare("INSERT INTO tasks (source_id, item_id, title, url, phase, priority) VALUES (?, ?, ?, ?, ?, ?)")
+      .run(sourceId, item.id, item.title, item.url, initialPhase, item.priority);
     const task = this.byId(Number(res.lastInsertRowid))!;
-    this.logEvent(task.id, null, "discovered", "engine", "discovered in source");
+    this.logEvent(task.id, null, initialPhase, "engine", "discovered in source");
     return task;
   }
 
@@ -89,25 +97,36 @@ export class TaskStore {
       throw new Error(`illegal transition ${task.phase} → ${to} for task ${id}`);
     }
     const patch = opts.patch ?? {};
+    // "set if the key is present in the patch, else keep the current value" —
+    // this lets a caller explicitly *clear* a field (e.g. agent_name/stage when
+    // a stage finishes) by passing null, which COALESCE could not express.
+    const keep = <K extends keyof TaskPatch>(key: K, current: unknown): string | number | null =>
+      (key in patch ? (patch[key] ?? null) : (current ?? null)) as string | number | null;
     this.db
       .prepare(
         `UPDATE tasks SET phase = ?,
-           workspace_id = COALESCE(?, workspace_id),
-           pane_id      = COALESCE(?, pane_id),
-           agent_name   = COALESCE(?, agent_name),
-           branch       = COALESCE(?, branch),
-           pr_url       = COALESCE(?, pr_url),
-           error        = ?,
-           updated_at   = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+           workspace_id  = ?,
+           pane_id       = ?,
+           agent_name    = ?,
+           stage         = ?,
+           dispatched_at = ?,
+           resume_phase  = ?,
+           branch        = ?,
+           pr_url        = ?,
+           error         = ?,
+           updated_at    = strftime('%Y-%m-%dT%H:%M:%fZ','now')
          WHERE id = ?`,
       )
       .run(
         to,
-        patch.workspaceId ?? null,
-        patch.paneId ?? null,
-        patch.agentName ?? null,
-        patch.branch ?? null,
-        patch.prUrl ?? null,
+        keep("workspaceId", task.workspaceId),
+        keep("paneId", task.paneId),
+        keep("agentName", task.agentName),
+        keep("stage", task.stage),
+        keep("dispatchedAt", task.dispatchedAt),
+        keep("resumePhase", task.resumePhase),
+        keep("branch", task.branch),
+        keep("prUrl", task.prUrl),
         patch.error ?? null,
         id,
       );
@@ -130,6 +149,74 @@ export class TaskStore {
     }));
   }
 
+  /**
+   * Update a task's herdr coordinates without a phase change (no lifecycle
+   * validation, no audit event). Used to record dispatch coordinates on a task
+   * that stays in its current lane. Same "present-key wins" semantics as the
+   * patch in `transition`.
+   */
+  update(id: number, patch: Partial<TaskPatch>): Task {
+    const task = this.byId(id);
+    if (!task) throw new Error(`task ${id} not found`);
+    const keep = <K extends keyof TaskPatch>(key: K, current: unknown): string | number | null =>
+      (key in patch ? (patch[key] ?? null) : (current ?? null)) as string | number | null;
+    this.db
+      .prepare(
+        `UPDATE tasks SET
+           workspace_id = ?, pane_id = ?, agent_name = ?, stage = ?, dispatched_at = ?,
+           resume_phase = ?, branch = ?, pr_url = ?, error = ?,
+           updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+         WHERE id = ?`,
+      )
+      .run(
+        keep("workspaceId", task.workspaceId),
+        keep("paneId", task.paneId),
+        keep("agentName", task.agentName),
+        keep("stage", task.stage),
+        keep("dispatchedAt", task.dispatchedAt),
+        keep("resumePhase", task.resumePhase),
+        keep("branch", task.branch),
+        keep("prUrl", task.prUrl),
+        "error" in patch ? (patch.error ?? null) : (task.error ?? null),
+        id,
+      );
+    return this.byId(id)!;
+  }
+
+  /** Record (or refresh) the herdr tab/agent that runs one stage of a task. */
+  recordStage(taskId: number, stage: Stage, coords: { paneId?: string; agentName?: string }): void {
+    this.db
+      .prepare(
+        `INSERT INTO task_stages (task_id, stage, pane_id, agent_name) VALUES (?, ?, ?, ?)
+         ON CONFLICT(task_id, stage) DO UPDATE SET
+           pane_id = COALESCE(excluded.pane_id, pane_id),
+           agent_name = COALESCE(excluded.agent_name, agent_name)`,
+      )
+      .run(taskId, stage, coords.paneId ?? null, coords.agentName ?? null);
+  }
+
+  stagesFor(taskId: number): TaskStage[] {
+    const rows = this.db
+      .prepare("SELECT * FROM task_stages WHERE task_id = ? ORDER BY id")
+      .all(taskId) as Record<string, unknown>[];
+    return rows.map((r) => ({
+      id: r.id as number,
+      taskId: r.task_id as number,
+      stage: r.stage as Stage,
+      paneId: r.pane_id as string | null,
+      agentName: r.agent_name as string | null,
+      createdAt: r.created_at as string,
+    }));
+  }
+
+  /** Find the task whose current stage agent is `agentName` (inbox sender check). */
+  byAgent(agentName: string): Task | null {
+    const r = this.db.prepare("SELECT * FROM tasks WHERE agent_name = ?").get(agentName) as
+      | Record<string, unknown>
+      | undefined;
+    return r ? rowToTask(r) : null;
+  }
+
   private logEvent(
     taskId: number,
     from: Phase | null,
@@ -145,10 +232,13 @@ export class TaskStore {
 }
 
 export interface TaskPatch {
-  workspaceId: string;
-  paneId: string;
-  agentName: string;
-  branch: string;
-  prUrl: string;
-  error: string;
+  workspaceId: string | null;
+  paneId: string | null;
+  agentName: string | null;
+  stage: Stage | null;
+  dispatchedAt: string | null;
+  resumePhase: Phase | null;
+  branch: string | null;
+  prUrl: string | null;
+  error: string | null;
 }

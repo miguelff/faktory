@@ -169,39 +169,32 @@ export function sessionNameFor(slug: string): string {
   return `faktory-${slug}`;
 }
 
-/** Detached workbench: serve, tui, and the agent loop each in their own named tab. */
-export function detachedWorkbench(slug: string, port: number, orchestratorKind: string) {
+/** Detached workbench: the serve tab (API + engine loop) and the board tab (TUI). */
+export function detachedWorkbench(slug: string, port: number) {
   return {
     instance: slug,
     prefix: instanceRef(slug).prefix,
     port,
     repoCwd: REPO_ROOT,
     faktoryBin: FAKTORY_BIN,
-    agentKind: orchestratorKind,
-    tui: true,
-    agent: true,
-    serveCommand: `${FAKTORY_BIN} serve ${slug} --no-tui --no-agent --port ${port}`,
+    board: true,
+    serveCommand: `${FAKTORY_BIN} serve ${slug} --no-board --port ${port}`,
   };
 }
 
 /**
- * Launcher mode: make sure the workbench runs INSIDE the session (serve tab,
- * TUI tab, agent-loop tab), then attach the current terminal to it. When the
- * session server isn't up yet, attaching starts it and a detached provisioner
- * sets the panes up as soon as the socket answers.
+ * Launcher mode: make sure the workbench runs INSIDE the session (serve tab +
+ * board tab), then attach the current terminal to it. When the session server
+ * isn't up yet, attaching starts it and a detached provisioner sets the panes
+ * up as soon as the socket answers.
  */
-export async function launchAndAttach(
-  slug: string,
-  sessionName: string,
-  port: number,
-  orchestratorKind: string,
-): Promise<void> {
+export async function launchAndAttach(slug: string, sessionName: string, port: number): Promise<void> {
   const client = await sessionClient(sessionName);
   if (client) {
     process.env.HERDR_SOCKET_PATH = sessionSocketPath(sessionName);
-    const result = await bootstrapDetached(client, detachedWorkbench(slug, port, orchestratorKind));
+    const result = await bootstrapDetached(client, detachedWorkbench(slug, port));
     if (result.servePaneId) console.log(`serve tab (pane ${result.servePaneId})`);
-    if (result.agentName && !result.agentAlreadyRunning) console.log(`orchestrator ${result.agentName} starting`);
+    if (result.boardPaneId) console.log(`board tab (pane ${result.boardPaneId})`);
   } else {
     spawn(FAKTORY_BIN, ["__provision", slug, "--session", sessionName, "--port", String(port)], {
       detached: true,

@@ -2,8 +2,12 @@ import { Command } from "commander";
 import { getConfig } from "../../core/db.ts";
 import { createApiServer } from "../../api/server.ts";
 import { HerdrClient } from "../../herdr/client.ts";
+import { HerdrDispatcher } from "../../herdr/loop-dispatcher.ts";
 import { bootstrapDetached, bootstrapWorkbench } from "../../herdr/bootstrap.ts";
 import { sessionSocketPath, waitForSession } from "../../herdr/session.ts";
+import { Loop } from "../../core/loop.ts";
+import type { Engine } from "../../core/engine.ts";
+import type { Stage, Task } from "../../core/types.ts";
 import { runSetup } from "../../setup.ts";
 import { ensureDependencies, harnessDependency, herdrDependency } from "../../deps.ts";
 import {
@@ -19,27 +23,31 @@ import {
 } from "../context.ts";
 import { selectedConfig, withConfigOption } from "../options.ts";
 
+const DEFAULT_WIP = 3;
+const DEFAULT_STALL_MS = 5 * 60_000;
+const DEFAULT_TICK_MS = 5_000;
+
 /**
  * `serve` is the single readiness gate that makes Faktory usable: resolve (or
  * set up) a config, ensure every external tool exists, then either move into a
  * herdr pane and attach the current terminal, or (inside a pane / headless)
- * start the API + web board and bootstrap the workbench.
+ * start the API + the deterministic engine loop and bootstrap the board.
  *
- * `__provision` is the hidden companion: pane setup for a cold-started session,
- * run detached by the launcher.
+ * The engine loop lives here — this process owns all state transitions,
+ * dispatch, and inbox handling. There is no orchestrator agent.
  */
 export function registerServe(program: Command): void {
   withConfigOption(
     program
       .command("serve [config]")
-      .description("set up (if needed) and start everything: API, web board, herdr session, TUI, orchestrator")
-      .option("--port <port>", "port for the web board / API")
-      .option("--agent-kind <kind>", "agent harness for /kickoff")
+      .description("set up (if needed) and start everything: API, engine loop, herdr session, kanban board")
+      .option("--port <port>", "port for the HTTP API")
+      .option("--agent-kind <kind>", "agent harness stage agents run as")
       .option("--repo-cwd <path>", "repository Faktory dispatches work in")
       .option("--session <name>", "herdr session name")
-      .option("--headless", "no herdr session, TUI, or orchestrator — just the API")
-      .option("--no-tui", "skip the TUI pane")
-      .option("--no-agent", "skip the orchestrator agent pane")
+      .option("--wip <n>", "how many tasks may occupy the actionable lanes")
+      .option("--headless", "no herdr session or board — just the API + loop")
+      .option("--no-board", "skip the kanban board pane")
       .action((configArg, opts) => runServe(configArg, opts)),
   );
 
@@ -53,10 +61,8 @@ export function registerServe(program: Command): void {
       process.env.HERDR_SOCKET_PATH = sessionSocketPath(sessionName);
       const { db } = requireInstance(slug);
       const port = Number(opts.port ?? getConfig(db, "port") ?? 4600);
-      const agentKind = getConfig(db, "agentKind") ?? "pi";
-      const orchestratorKind = getConfig(db, "orchestratorKind") ?? agentKind;
       db.close();
-      await bootstrapDetached(client, detachedWorkbench(slug, port, orchestratorKind));
+      await bootstrapDetached(client, detachedWorkbench(slug, port));
     });
 }
 
@@ -67,9 +73,19 @@ interface ServeOpts {
   agentKind?: string;
   repoCwd?: string;
   session?: string;
+  wip?: string;
   headless?: boolean;
-  tui: boolean; // commander sets `tui: false` for --no-tui
-  agent: boolean; // commander sets `agent: false` for --no-agent
+  board: boolean; // commander sets `board: false` for --no-board
+}
+
+/** Build the loop config that binds agents' `faktory report` command + WIP. */
+function loopConfig(engine: Engine, slug: string, port: number, wip: number) {
+  return {
+    wip,
+    stallTimeoutMs: DEFAULT_STALL_MS,
+    reportCommandFor: (task: Task, stage: Stage, agentName: string) =>
+      `${FAKTORY_BIN} report ${task.id} --config ${slug} --port ${port} --sender ${agentName} --stage ${stage}`,
+  };
 }
 
 async function runServe(configArg: string | undefined, opts: ServeOpts): Promise<void> {
@@ -82,14 +98,15 @@ async function runServe(configArg: string | undefined, opts: ServeOpts): Promise
     ctx = requireInstance(slug);
   }
   const agentKind = opts.agentKind ?? getConfig(ctx.db, "agentKind") ?? "pi";
-  const orchestratorKind = getConfig(ctx.db, "orchestratorKind") ?? agentKind;
   const port = Number(opts.port ?? getConfig(ctx.db, "port") ?? 4600);
+  // Guard against a non-numeric --wip / stored config: a NaN WIP would make the
+  // loop's `count >= wip` cap always false and flood the lanes with the whole
+  // backlog. Fall back to the default on anything that isn't a valid count.
+  const wipRaw = Number(opts.wip ?? getConfig(ctx.db, "wip") ?? DEFAULT_WIP);
+  const wip = Number.isInteger(wipRaw) && wipRaw >= 0 ? wipRaw : DEFAULT_WIP;
 
-  // serve is the single readiness gate: every external tool the workbench needs
-  // (herdr, task harness, orchestrator harness) is checked and installed here,
-  // never by the individual components it bootstraps.
   if (!opts.headless) {
-    await ensureDependencies([herdrDependency(), harnessDependency(agentKind), harnessDependency(orchestratorKind)]);
+    await ensureDependencies([herdrDependency(), harnessDependency(agentKind)]);
   }
 
   // Faktory owns herdr. From a plain terminal, serve itself moves into a pane
@@ -99,7 +116,7 @@ async function runServe(configArg: string | undefined, opts: ServeOpts): Promise
   if (!insidePane && !opts.headless) {
     const sessionName = opts.session ?? getConfig(ctx.db, "herdrSession") ?? sessionNameFor(slug);
     ctx.db.close();
-    await launchAndAttach(slug, sessionName, port, orchestratorKind);
+    await launchAndAttach(slug, sessionName, port);
     return;
   }
 
@@ -108,19 +125,30 @@ async function runServe(configArg: string | undefined, opts: ServeOpts): Promise
   try {
     herdr = HerdrClient.fromEnv();
   } catch {
-    console.warn("warning: no herdr session — dispatch disabled");
+    console.warn("warning: no herdr session — the engine loop is disabled (API-only, view mode)");
   }
-  const server = createApiServer({
-    engine,
-    prefix: ctx.ref.prefix,
-    herdr,
-    dispatchDefaults: {
-      agentKind,
-      repoCwd: opts.repoCwd ?? getConfig(ctx.db, "repoCwd") ?? undefined,
-    },
-  });
+
+  const server = createApiServer({ engine, prefix: ctx.ref.prefix });
   server.listen(port, "127.0.0.1", async () => {
     console.log(`faktory ${ctx.ref.prefix} on http://127.0.0.1:${port}`);
+
+    // The engine loop: this process is the deterministic coordinator.
+    if (herdr) {
+      const repoCwd = opts.repoCwd ?? getConfig(ctx.db, "repoCwd") ?? REPO_ROOT;
+      const dispatcher = new HerdrDispatcher(herdr, ctx.ref.prefix, { agentKind, repoCwd });
+      const loop = new Loop(engine, dispatcher, loopConfig(engine, slug, port, wip));
+      const tick = async () => {
+        try {
+          await loop.tick();
+        } catch (e) {
+          console.warn(`loop tick failed: ${(e as Error).message}`);
+        }
+      };
+      await tick();
+      setInterval(tick, DEFAULT_TICK_MS).unref();
+      console.log(`engine loop running (wip ${wip})`);
+    }
+
     const fromPaneId = process.env.HERDR_PANE_ID;
     if (opts.headless || !herdr || !fromPaneId) return;
     try {
@@ -130,21 +158,13 @@ async function runServe(configArg: string | undefined, opts: ServeOpts): Promise
         port,
         repoCwd: REPO_ROOT,
         faktoryBin: FAKTORY_BIN,
-        agentKind: orchestratorKind,
         fromPaneId,
         serveTab: true,
-        tui: opts.tui,
-        agent: opts.agent,
+        board: opts.board,
       });
       if (result.alreadyBootstrapped)
         console.log(`workspace ${result.workspaceId} already bootstrapped — tabs preserved`);
-      if (result.tuiPaneId) console.log(`tui tab (pane ${result.tuiPaneId})`);
-      if (result.agentName)
-        console.log(
-          result.agentAlreadyRunning
-            ? `orchestrator ${result.agentName} already running`
-            : `orchestrator ${result.agentName} (${orchestratorKind}) started in its own tab (pane ${result.agentPaneId})`,
-        );
+      if (result.boardPaneId) console.log(`board tab (pane ${result.boardPaneId})`);
     } catch (e) {
       console.warn(`warning: workbench bootstrap failed: ${(e as Error).message}`);
     }

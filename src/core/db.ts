@@ -57,6 +57,67 @@ const MIGRATIONS: string[] = [
   CREATE INDEX idx_tasks_phase ON tasks(phase);
   CREATE INDEX idx_task_events_task ON task_events(task_id);
   `,
+  // Migration 2: the programmatic engine loop. Replace the old 11-phase
+  // lifecycle with the pipeline (backlog → to_shape → to_execute → to_review →
+  // ready → done + blocked/archived); add the inbox (agent→loop channel), the
+  // action feed, and per-task stage tabs.
+  `
+  -- Remap existing task phases onto the new pipeline (best-effort).
+  UPDATE tasks SET phase = CASE phase
+    WHEN 'discovered'      THEN 'backlog'
+    WHEN 'queued'          THEN 'backlog'
+    WHEN 'dispatching'     THEN 'to_execute'
+    WHEN 'running'         THEN 'to_execute'
+    WHEN 'reviewing'       THEN 'to_review'
+    WHEN 'ready_to_deploy' THEN 'ready'
+    WHEN 'deploying'       THEN 'ready'
+    WHEN 'done'            THEN 'done'
+    WHEN 'failed'          THEN 'blocked'
+    WHEN 'cancelled'       THEN 'archived'
+    ELSE phase
+  END;
+
+  ALTER TABLE tasks ADD COLUMN stage         TEXT;
+  ALTER TABLE tasks ADD COLUMN resume_phase  TEXT;
+  -- Explicit "an agent is working this lane task" signal (set on dispatch,
+  -- cleared on completion/block/stall). Distinguishes a lane task being worked
+  -- from one still waiting in the loop's inbox.
+  ALTER TABLE tasks ADD COLUMN dispatched_at TEXT;
+
+  CREATE TABLE task_stages (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id    INTEGER NOT NULL REFERENCES tasks(id),
+    stage      TEXT NOT NULL,
+    pane_id    TEXT,
+    agent_name TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    UNIQUE (task_id, stage)
+  );
+
+  CREATE TABLE inbox (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id    INTEGER NOT NULL REFERENCES tasks(id),
+    stage      TEXT,
+    type       TEXT NOT NULL,          -- completed | needs_human | note
+    sender     TEXT,                   -- herdr agent name
+    note       TEXT,
+    data       TEXT,                   -- JSON handoff payload
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    applied_at TEXT,                   -- when the loop consumed it (null = pending)
+    outcome    TEXT                    -- applied | rejected:<reason> | surfaced
+  );
+  CREATE INDEX idx_inbox_pending ON inbox(task_id) WHERE applied_at IS NULL;
+
+  CREATE TABLE feed (
+    id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    task_id INTEGER,
+    kind    TEXT NOT NULL,             -- sync|transition|dispatch|inbox|annotation|stall
+    actor   TEXT NOT NULL,             -- engine | agent:<name>
+    message TEXT NOT NULL
+  );
+  CREATE INDEX idx_feed_at ON feed(id DESC);
+  `,
 ];
 
 export function openDb(path: string): DatabaseSync {

@@ -1,22 +1,19 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { readFileSync } from "node:fs";
-import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
 import type { Engine } from "../core/engine.ts";
-import type { Phase } from "../core/types.ts";
-import { PHASES } from "../core/types.ts";
-import type { HerdrClient } from "../herdr/client.ts";
-import { dispatchTask, type DispatchOptions } from "../herdr/orchestrator.ts";
+import type { Phase, Stage } from "../core/types.ts";
+import { PHASES, STAGES } from "../core/types.ts";
+import { isInboxType } from "../core/inbox.ts";
 
 /**
- * HTTP control plane. Consumed by the web UI and by the orchestrator agent
- * (via the faktory-orchestrator skill). JSON in/out, localhost only.
+ * HTTP control plane. It is now a thin, read-mostly surface: the board/feed for
+ * viewers, and the **inbox** endpoint agents use to talk back to the loop
+ * (`faktory report` wraps it). Dispatch and lifecycle policy live in the engine
+ * loop, not here — the only writes callers make are inbox messages and manual
+ * repair transitions. JSON in/out, localhost only.
  */
 export interface ApiDeps {
   engine: Engine;
   prefix: string;
-  herdr?: HerdrClient;
-  dispatchDefaults?: Partial<DispatchOptions>;
 }
 
 type Handler = (req: IncomingMessage, res: ServerResponse, params: Record<string, string>) => Promise<void>;
@@ -26,14 +23,12 @@ export function createApiServer(deps: ApiDeps): Server {
 
   const route = (method: string, path: string, handler: Handler) => {
     const names: string[] = [];
-    const pattern = new RegExp(
-      "^" + path.replace(/:([a-zA-Z]+)/g, (_, n) => (names.push(n), "([^/]+)")) + "$",
-    );
+    const pattern = new RegExp("^" + path.replace(/:([a-zA-Z]+)/g, (_, n) => (names.push(n), "([^/]+)")) + "$");
     routes.push({ method, pattern, names, handler });
   };
 
   route("GET", "/api/health", async (_req, res) => {
-    json(res, 200, { ok: true, prefix: deps.prefix, phases: PHASES });
+    json(res, 200, { ok: true, prefix: deps.prefix, phases: PHASES, stages: STAGES });
   });
 
   route("GET", "/api/tasks", async (req, res) => {
@@ -45,7 +40,24 @@ export function createApiServer(deps: ApiDeps): Server {
   route("GET", "/api/tasks/:id", async (_req, res, p) => {
     const task = deps.engine.tasks.byId(Number(p.id));
     if (!task) return json(res, 404, { error: "not found" });
-    json(res, 200, { task, events: deps.engine.tasks.events(task.id) });
+    json(res, 200, {
+      task,
+      events: deps.engine.tasks.events(task.id),
+      inbox: deps.engine.inbox.forTask(task.id),
+      stages: deps.engine.tasks.stagesFor(task.id),
+    });
+  });
+
+  // The board grouped by column (phase), each ordered by priority desc.
+  route("GET", "/api/board", async (_req, res) => {
+    const columns = PHASES.map((phase) => ({ phase, tasks: deps.engine.tasks.list(phase) }));
+    json(res, 200, { columns });
+  });
+
+  route("GET", "/api/feed", async (req, res) => {
+    const url = new URL(req.url!, "http://x");
+    const limit = Number(url.searchParams.get("limit") ?? 50);
+    json(res, 200, { feed: deps.engine.feed.recent(Number.isFinite(limit) ? limit : 50) });
   });
 
   route("POST", "/api/sync", async (_req, res) => {
@@ -53,12 +65,19 @@ export function createApiServer(deps: ApiDeps): Server {
     json(res, 200, { discovered: fresh });
   });
 
+  // Manual repair only — the loop owns automatic transitions. `force` bypasses
+  // lifecycle validation (still audited) for stuck-state repair.
   route("POST", "/api/tasks/:id/transition", async (req, res, p) => {
     const body = await readJson(req);
     const to = body.to as Phase;
     if (!PHASES.includes(to)) return json(res, 400, { error: `invalid phase ${JSON.stringify(body.to)}` });
     try {
-      const task = await deps.engine.transition(Number(p.id), to, String(body.actor ?? "api"), body.note);
+      const task = body.force
+        ? deps.engine.tasks.transition(Number(p.id), to, String(body.actor ?? "api"), {
+            force: true,
+            note: body.note,
+          })
+        : await deps.engine.transition(Number(p.id), to, String(body.actor ?? "api"), body.note);
       json(res, 200, { task });
     } catch (e) {
       json(res, 409, { error: String((e as Error).message) });
@@ -85,41 +104,29 @@ export function createApiServer(deps: ApiDeps): Server {
     }
   });
 
-  route("POST", "/api/tasks/:id/dispatch", async (req, res, p) => {
-    if (!deps.herdr) return json(res, 503, { error: "herdr is not connected" });
+  // The inbox: the one channel agents use to talk back to the loop. The loop
+  // (not this endpoint) validates origin + transition legality and applies it.
+  route("POST", "/api/tasks/:id/inbox", async (req, res, p) => {
     const body = await readJson(req);
     const id = Number(p.id);
-    const task = deps.engine.tasks.byId(id);
-    if (!task) return json(res, 404, { error: "not found" });
-    // The loop must not start processing anything until the task is queued.
-    // Guard here — before any claim or herdr work — so a non-queued task is
-    // left untouched (no ownership claim, no failed transition) instead of
-    // being dragged partway through dispatch.
-    if (task.phase !== "queued") {
-      return json(res, 409, { error: `task ${id} is ${task.phase}, not queued`, task });
+    if (!deps.engine.tasks.byId(id)) return json(res, 404, { error: "not found" });
+    if (!isInboxType(body.type)) {
+      return json(res, 400, { error: `type must be one of completed | needs_human | note` });
     }
-    try {
-      await deps.engine.transition(id, "dispatching", "api", "dispatch requested");
-      const opts: DispatchOptions = {
-        agentKind: body.agentKind ?? deps.dispatchDefaults?.agentKind ?? "pi",
-        repoCwd: body.repoCwd ?? deps.dispatchDefaults?.repoCwd,
-        repoWorkspaceId: body.repoWorkspaceId ?? deps.dispatchDefaults?.repoWorkspaceId,
-        kickoffCommand: body.kickoffCommand ?? deps.dispatchDefaults?.kickoffCommand,
-      };
-      const result = await dispatchTask(deps.herdr, task, deps.prefix, opts);
-      const updated = deps.engine.tasks.transition(id, "running", "api", { note: "agent started", patch: result });
-      json(res, 200, { task: updated, herdr: result });
-    } catch (e) {
-      const failed = deps.engine.tasks.transition(id, "failed", "api", {
-        note: String((e as Error).message),
-        force: true,
-        patch: { error: String((e as Error).message) },
-      });
-      json(res, 500, { error: String((e as Error).message), task: failed });
+    const stage = body.stage as Stage | undefined;
+    if (stage != null && !STAGES.includes(stage)) {
+      return json(res, 400, { error: `invalid stage ${JSON.stringify(body.stage)}` });
     }
+    const message = deps.engine.inbox.enqueue({
+      taskId: id,
+      type: body.type,
+      stage: stage ?? null,
+      sender: body.sender ?? null,
+      note: body.note ?? null,
+      data: body.data ?? null,
+    });
+    json(res, 202, { ok: true, message });
   });
-
-  const webDir = join(dirname(fileURLToPath(import.meta.url)), "..", "web");
 
   return createServer(async (req, res) => {
     try {
@@ -130,11 +137,6 @@ export function createApiServer(deps: ApiDeps): Server {
         if (!m) continue;
         const params = Object.fromEntries(r.names.map((n, i) => [n, m[i + 1]!]));
         await r.handler(req, res, params);
-        return;
-      }
-      if (req.method === "GET" && (path === "/" || path === "/index.html")) {
-        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-        res.end(readFileSync(join(webDir, "index.html")));
         return;
       }
       json(res, 404, { error: "not found" });

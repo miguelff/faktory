@@ -1,23 +1,24 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { isTuiProcess, orchestratorAgentName, orchestratorPrompt, paneIdOf } from "../src/herdr/bootstrap.ts";
+import { isBoardProcess, isServeProcess, paneIdOf, TAB_LABELS, workspaceLabel } from "../src/herdr/bootstrap.ts";
 
-test("orchestrator agent name derives from the instance prefix", () => {
-  assert.equal(orchestratorAgentName("faktory-fk"), "faktory-fk-orchestrator");
+test("the workbench is two named tabs: serve + board (no agent)", () => {
+  assert.deepEqual(Object.values(TAB_LABELS).sort(), ["board", "serve"]);
 });
 
-test("orchestrator prompt is harness-agnostic and points at skill + API", () => {
-  const prompt = orchestratorPrompt({ instance: "fk", prefix: "faktory-fk", port: 4601 });
-  assert.match(prompt, /skills\/faktory-orchestrator\/SKILL\.md/);
-  assert.match(prompt, /http:\/\/127\.0\.0\.1:4601/);
-  assert.match(prompt, /state machine/);
-  assert.doesNotMatch(prompt, /\bpi\b/, "prompt must not hardcode a harness");
+test("workspaceLabel namespaces by instance", () => {
+  assert.equal(workspaceLabel("fk"), "faktory:fk");
 });
 
-test("isTuiProcess recognises a running faktory tui", () => {
-  assert.ok(isTuiProcess("node /repo/node_modules/.bin/tsx /repo/src/cli.ts tui --instance fk"));
-  assert.ok(!isTuiProcess("-bash"));
-  assert.ok(!isTuiProcess("node /repo/src/cli.ts serve --instance fk"));
+test("isBoardProcess recognises a running faktory tui board", () => {
+  assert.ok(isBoardProcess("node /repo/node_modules/.bin/tsx /repo/src/cli.ts tui --config fk"));
+  assert.ok(!isBoardProcess("-bash"));
+  assert.ok(!isBoardProcess("node /repo/src/cli.ts serve --config fk"));
+});
+
+test("isServeProcess recognises a running faktory serve", () => {
+  assert.ok(isServeProcess("node /repo/src/cli.ts serve fk --no-board"));
+  assert.ok(!isServeProcess("node /repo/src/cli.ts tui --config fk"));
 });
 
 test("paneIdOf accepts both pane response shapes (pane.split and tab.create)", () => {
