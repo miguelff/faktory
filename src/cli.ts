@@ -9,7 +9,9 @@ import { createApiServer } from "./api/server.ts";
 import { HerdrClient } from "./herdr/client.ts";
 import type { Phase } from "./core/types.ts";
 import { Tui } from "./tui/tui.ts";
-import { createPrompter, runSetup } from "./setup.ts";
+import { createPrompter, joinFromInvite, runSetup } from "./setup.ts";
+import { datasourceIdentity, decodeInvite, encodeInvite } from "./core/invite.ts";
+import { findConfigLinkingDatasource } from "./collab.ts";
 import { bootstrapDetached, bootstrapWorkbench } from "./herdr/bootstrap.ts";
 import { attachSession, ensureSession, sessionClient, sessionSocketPath, waitForSession } from "./herdr/session.ts";
 import { spawn } from "node:child_process";
@@ -48,9 +50,11 @@ const FAKTORY_BIN = join(REPO_ROOT, "bin", "faktory");
  *   tui                    inspect / repair state in the terminal
  *   config:set <k> <v>     persist config values (repoCwd, agentKind, orchestratorKind, port, herdrSession)
  *   config:get [k]         show config values
+ *   invite [config]        print a shareable string modelling this config's datasource
+ *   join <string>          set up a new config linked to a shared datasource (bails on duplicates)
  */
 const HELP = `usage: faktory [config-name]        set up (first run if needed) and start everything
-       faktory <command> [options]  advanced: serve|setup|config|instances|source:set-notion|sync|tasks|transition|orchestrate|tui|config:set|config:get|help
+       faktory <command> [options]  advanced: serve|setup|config|instances|source:set-notion|sync|tasks|transition|orchestrate|tui|config:set|config:get|invite|join|help
 
   config list                    list configs (their prefix, port, and backlog db)
   config create [name]           create a config (runs the setup wizard)
@@ -130,6 +134,28 @@ function describeConfig(slug: string): string {
     }
   } catch {
     return slug;
+  }
+}
+
+/**
+ * Resolve which existing config a command targets: the requested one, the only
+ * one, or a terminal pick among the existing configs. Unlike serve, there is
+ * no "start a new one" option — the config must already exist.
+ */
+async function resolveExistingConfig(requested: string | undefined): Promise<string> {
+  const configs = listInstances();
+  if (requested) {
+    const slug = instanceRef(requested).slug;
+    if (!configs.includes(slug)) throw new Error(`config "${slug}" does not exist (available: ${configs.join(", ") || "none"})`);
+    return slug;
+  }
+  if (configs.length === 0) throw new Error("no configs yet — run faktory serve to set one up");
+  if (configs.length === 1) return configs[0]!;
+  const ui = createPrompter();
+  try {
+    return await ui.pick("Which config?", configs, (s) => s);
+  } finally {
+    ui.close();
   }
 }
 
@@ -214,6 +240,8 @@ const COMMANDS = new Set([
   "tui",
   "config:set",
   "config:get",
+  "invite",
+  "join",
   "help",
   "__provision",
 ]);
@@ -517,6 +545,38 @@ async function main() {
     case "tui": {
       const ctx = requireInstance(flags.config ?? flags.instance);
       new Tui(buildEngine(ctx), ctx.ref.prefix).start();
+      break;
+    }
+    // Collaboration: share the datasource one config points at (invite), or
+    // set up a new local config linked to a shared datasource (join).
+    case "invite": {
+      const slug = await resolveExistingConfig(positionals[0] ?? flags.config ?? flags.instance);
+      const { ref, db } = requireInstance(slug);
+      const sourceRow = db.prepare("SELECT id, kind, config FROM sources LIMIT 1").get() as
+        | { id: string; kind: string; config: string }
+        | undefined;
+      if (!sourceRow) throw new Error(`config "${ref.slug}" has no source to share — run faktory setup first`);
+      const config = JSON.parse(sourceRow.config) as Record<string, unknown>;
+      const secretKey = (config.tokenSecret as string | undefined) ?? "notion.token";
+      const secret = getSecret(db, secretKey) ?? undefined;
+      const invite = encodeInvite({ v: 1, kind: sourceRow.kind, config, secret });
+      console.error(
+        `invite for config "${ref.slug}" (datasource ${datasourceIdentity(sourceRow.kind, config)}).\n` +
+          (secret ? "⚠ this string embeds an access token — share it over a trusted channel, never commit it.\n" : "") +
+          "the recipient runs: faktory join <string>\n",
+      );
+      console.log(invite);
+      break;
+    }
+    case "join": {
+      const str = positionals[0];
+      if (!str) throw new Error("usage: faktory join <invite-string>");
+      const invite = decodeInvite(str);
+      const identity = datasourceIdentity(invite.kind, invite.config);
+      const existing = findConfigLinkingDatasource(identity);
+      if (existing) throw new Error(`config "${existing}" already links this datasource (${identity}) — nothing to join`);
+      const joined = await joinFromInvite(invite, { name: flags.config ?? flags.instance });
+      console.log(joined);
       break;
     }
     case "help":
