@@ -176,8 +176,11 @@ export function notionIdFromLink(input: string): string | null {
   const peek = compact.match(/[?&]p=([0-9a-f]{32})\b/i);
   if (peek) return dash(peek[1]!.toLowerCase());
   const path = compact.split("?")[0]!;
-  const ids = path.match(/[0-9a-f]{32}/gi);
-  return ids?.length ? dash(ids[ids.length - 1]!.toLowerCase()) : null;
+  // The id ends the URL slug, but the slug itself may end in hex-looking
+  // letters (…-Area-<id> → "ea" + id is one 34-char hex run), so match maximal
+  // hex runs and keep the LAST 32 characters of the last one.
+  const runs = path.match(/[0-9a-f]{32,}/gi);
+  return runs?.length ? dash(runs[runs.length - 1]!.slice(-32).toLowerCase()) : null;
 }
 
 function databaseTitle(db: any): string {

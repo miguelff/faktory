@@ -41,6 +41,11 @@ test("notionIdFromLink extracts the id from pasted links and bare ids", () => {
     dashed,
     "a peek link resolves to the page actually open",
   );
+  assert.equal(
+    notionIdFromLink("https://app.notion.com/p/Miguel-s-Private-Area-1de433c3987181b898daf2d859951c7f?source=copy_link"),
+    "1de433c3-9871-81b8-98da-f2d859951c7f",
+    "a slug ending in hex-looking letters must not shift the id window",
+  );
   assert.equal(notionIdFromLink("https://www.notion.so/acme/just-a-page"), null);
   assert.equal(notionIdFromLink("not a link at all"), null);
 });
