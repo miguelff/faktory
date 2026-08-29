@@ -3,6 +3,9 @@ import type { WorkItem } from "../core/types.ts";
 import { FAKTORY_STATUSES } from "../core/lifecycle.ts";
 import type { SourceConfigRecord, SourceContext, WorkSource } from "./types.ts";
 
+/** Terminal faktory_status that must never resurface as a candidate. */
+const DONE = "done";
+
 /**
  * Notion work source adapter.
  *
@@ -69,14 +72,22 @@ export function pageToWorkItem(page: any, cfg: NotionSourceConfig): WorkItem {
 
 /**
  * Pure: candidacy filter — every unowned entry (discoverable by anyone) plus
- * the entries this instance already owns. Exported for tests.
+ * the entries this instance already owns, but never anything already finished
+ * (`faktory_status = done`). Archived (trashed) pages are excluded by Notion's
+ * query API by default, and defensively skipped in listCandidates. Exported
+ * for tests.
  */
 export function buildCandidateFilter(cfg: NotionSourceConfig, prefix: string): Record<string, unknown> {
   const names = propNames(cfg);
   return {
-    or: [
-      { property: names.ownedBy, rich_text: { is_empty: true } },
-      { property: names.ownedBy, rich_text: { equals: prefix } },
+    and: [
+      {
+        or: [
+          { property: names.ownedBy, rich_text: { is_empty: true } },
+          { property: names.ownedBy, rich_text: { equals: prefix } },
+        ],
+      },
+      { property: names.status, select: { does_not_equal: DONE } },
     ],
   };
 }
@@ -124,7 +135,14 @@ class NotionSource implements WorkSource {
           ...(cursor ? { start_cursor: cursor } : {}),
         }),
       });
-      for (const page of body.results ?? []) items.push(pageToWorkItem(page, this.cfg));
+      for (const page of body.results ?? []) {
+        // Defensive: never surface archived/trashed entries even if a source
+        // returns them, and never re-pick anything already done.
+        if (page.archived || page.in_trash) continue;
+        const item = pageToWorkItem(page, this.cfg);
+        if (item.status === DONE) continue;
+        items.push(item);
+      }
       cursor = body.has_more ? body.next_cursor : undefined;
     } while (cursor);
     return items;

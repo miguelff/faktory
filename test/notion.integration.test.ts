@@ -138,10 +138,27 @@ test("listCandidates paginates and filters to unowned + own entries", async () =
   assert.equal(items[1]!.ownedBy, "faktory-test");
   assert.equal(items[1]!.status, "running");
   const filter = state.lastQueryFilter as any;
-  assert.deepEqual(filter.or, [
+  assert.deepEqual(filter.and[0].or, [
     { property: "faktory_owned_by", rich_text: { is_empty: true } },
     { property: "faktory_owned_by", rich_text: { equals: "faktory-test" } },
   ]);
+  assert.deepEqual(filter.and[1], { property: "faktory_status", select: { does_not_equal: "done" } });
+});
+
+test("listCandidates skips done and archived entries the source still returns", async () => {
+  const donePage = page("pd", "faktory-test", "done", 3);
+  const archivedPage = { ...page("pa", null, null, 4), archived: true };
+  state.pages.set("pd", donePage);
+  state.pages.set("pa", archivedPage);
+  try {
+    const source = makeSource();
+    const ids = (await source.listCandidates()).map((i) => i.id);
+    assert.ok(!ids.includes("pd"), "done entry is not surfaced");
+    assert.ok(!ids.includes("pa"), "archived entry is not surfaced");
+  } finally {
+    state.pages.delete("pd");
+    state.pages.delete("pa");
+  }
 });
 
 test("getItem returns null on 404", async () => {
@@ -210,6 +227,11 @@ test("ensureProperties adds only the missing faktory_* columns", async () => {
 
 test("buildCandidateFilter honours custom property names", () => {
   const f = buildCandidateFilter({ ...cfg, ownedByProperty: "owner" }, "faktory-x") as any;
-  assert.deepEqual(f.or[0], { property: "owner", rich_text: { is_empty: true } });
-  assert.deepEqual(f.or[1], { property: "owner", rich_text: { equals: "faktory-x" } });
+  assert.deepEqual(f.and[0].or[0], { property: "owner", rich_text: { is_empty: true } });
+  assert.deepEqual(f.and[0].or[1], { property: "owner", rich_text: { equals: "faktory-x" } });
+});
+
+test("buildCandidateFilter excludes finished (done) entries", () => {
+  const f = buildCandidateFilter(cfg, "faktory-x") as any;
+  assert.deepEqual(f.and[1], { property: "faktory_status", select: { does_not_equal: "done" } });
 });
