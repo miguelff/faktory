@@ -59,6 +59,41 @@ Optional per-config settings (stored in the config's state DB):
 bin/faktory transition --help   # see CLI usage
 ```
 
+## Collaborate
+
+Several operators can drive **one shared datasource** (a single Notion backlog)
+from their own machines. Each runs an independent config with its own slug, so
+its owner id (`faktory-<slug>`) is distinct: every entry in the database is
+discoverable by everyone, and an operator only manages the entries their config
+claims via `faktory_owned_by` (compare-and-swap — a lost race cancels the local
+task). Nothing else is shared: state DBs, secrets, ports, and herdr sessions
+stay per-config and local.
+
+Onboarding a teammate is two commands:
+
+```sh
+# on the operator who already has the datasource configured
+bin/faktory invite            # picks the only config, or asks; prints one string
+bin/faktory invite omnia      # a specific config
+
+# on the teammate, with the string you sent them
+bin/faktory join <string>     # sets up a new local config linked to that datasource
+```
+
+`invite` prints a single opaque string that models the config's datasource: the
+source kind, its adapter config (e.g. the Notion database id + priority
+mapping), and the access token needed to reach it. **The string embeds a
+secret** — share it over a trusted channel (password manager, DM), never commit
+it. Guidance and the warning are printed to stderr, so `bin/faktory invite >
+invite.txt` captures just the string.
+
+`join` decodes the string and runs a short setup: pick a config name (its own
+owner id), confirm dispatch defaults, done — the datasource, credentials, and
+ownership columns come from the invite. It **bails if a local config already
+links that datasource**, so you never end up with two configs fighting over the
+same backlog under different owner ids on one machine. Because each joiner gets
+a distinct `faktory-<slug>` prefix, claims never collide across operators.
+
 ## Run
 
 **One command** — Faktory spawns herdr, not the other way around:
@@ -91,6 +126,8 @@ Other commands:
 bin/faktory sync   --config omnia            # pull candidates into the task table
 bin/faktory tasks  --config omnia            # list tasks
 bin/faktory tui    --config omnia            # inspect / repair in the terminal
+bin/faktory invite omnia                     # share this config's datasource
+bin/faktory join   <string>                  # link a new config to a shared datasource
 ```
 
 - **Web board**: http://127.0.0.1:4600 — sync, queue, dispatch, watch phases.

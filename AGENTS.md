@@ -8,6 +8,33 @@ A local orchestration system that drives coding agents inside herdr from an
 issue backlog (Notion today; Jira/GitHub behind the same abstraction). Start
 with `docs/DESIGN.md`; the HTTP control plane is in `docs/API.md`.
 
+## Collaboration model
+
+Many operators, one shared datasource. Each operator runs an independent config
+with its own slug, so its owner id (`faktory-<slug>`) is unique. Ownership is
+the coordination primitive: every entry in the backing database is discoverable
+by everyone, and an operator only manages entries their config claims via
+`faktory_owned_by` (compare-and-swap; a lost race cancels the local task). Only
+the datasource is shared — state DBs, secrets, ports, and herdr sessions are
+per-config and local. Distinct prefixes guarantee claims never collide across
+operators, so no engine changes are needed to support teams.
+
+Onboarding is `invite`/`join` (`src/cli.ts`, backed by pure encode/decode in
+`src/core/invite.ts`):
+
+- `faktory invite [config]` prints one opaque, versioned string modelling the
+  config's datasource — source kind, adapter config, **and the access secret**.
+  Guidance/secret warning go to stderr so the string pipes cleanly to stdout.
+- `faktory join <string>` sets up a new local config linked to that datasource
+  (its own slug/prefix), and **bails** when a local config already links the
+  same datasource — matched via `datasourceIdentity()` (Notion ids normalized
+  dashless/case-insensitive). Keep the wire format versioned (`fkinv1_` prefix);
+  bump it rather than silently changing the envelope.
+
+When you add a work source, make sure `datasourceIdentity()` produces a stable
+identity for it (add a kind-specific branch if the generic config hash is too
+broad) so duplicate-join detection keeps working.
+
 ## House rules
 
 - **TypeScript strict, ESM, Node ≥ 24.** No new runtime dependencies without a
