@@ -95,8 +95,12 @@ async function resolveServeConfig(requested: string | undefined): Promise<string
         const target = await ui.pick("Delete which config?", [...current, CANCEL], (s) => s, current.length);
         if (target !== CANCEL) {
           const ref = instanceRef(target);
-          const ok = (await ui.ask(`Delete "${ref.slug}" and all its local state in ${ref.dir}? (y/n)`, "n"))
-            .toLowerCase() === "y";
+          const ok = isYes(
+            await ui.ask(
+              `Delete "${ref.slug}" and all its local state in ${ref.dir}? Stop any running serve for it first. (y/n)`,
+              "n",
+            ),
+          );
           if (ok) {
             removeInstance(ref.slug);
             console.log(`deleted config "${ref.slug}"`);
@@ -131,6 +135,12 @@ function describeConfig(slug: string): string {
 
 function hasSource(ctx: ReturnType<typeof requireInstance>): boolean {
   return !!ctx.db.prepare("SELECT 1 FROM sources LIMIT 1").get();
+}
+
+/** Accept both "y" and "yes" (case-insensitive) as confirmation. */
+function isYes(answer: string): boolean {
+  const a = answer.trim().toLowerCase();
+  return a === "y" || a === "yes";
 }
 
 /**
@@ -284,8 +294,8 @@ async function main() {
             const ui = createPrompter();
             let ok = false;
             try {
-              ok = (await ui.ask(`Delete config "${ref.slug}" and all its local state in ${ref.dir}? (y/n)`, "n"))
-                .toLowerCase() === "y";
+              console.log(`Stop any running serve for "${ref.slug}" before deleting \u2014 this removes its SQLite DB and secrets.`);
+              ok = isYes(await ui.ask(`Delete config "${ref.slug}" and all its local state in ${ref.dir}? (y/n)`, "n"));
             } finally {
               ui.close();
             }
