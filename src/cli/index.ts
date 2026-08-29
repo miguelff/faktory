@@ -6,7 +6,7 @@ import { registerSource } from "./commands/source.ts";
 import { registerTasks } from "./commands/tasks.ts";
 import { registerTui } from "./commands/tui.ts";
 import { registerCollab } from "./commands/collab.ts";
-import { registerOrchestrate } from "./commands/orchestrate.ts";
+import { registerReport } from "./commands/report.ts";
 
 /**
  * Assemble the Commander program from the command registry. Adding a command is
@@ -35,7 +35,7 @@ export function buildProgram(): Command {
     registerSource,
     registerTasks,
     registerTui,
-    registerOrchestrate,
+    registerReport,
     registerCollab,
   ];
   for (const register of registrars) register(program);

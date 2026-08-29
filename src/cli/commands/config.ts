@@ -87,7 +87,7 @@ export function registerConfig(program: Command): void {
   withConfigOption(config.command("set <key> <value>").description("persist a config setting"))
     .addHelpText(
       "after",
-      "\nKeys: repoCwd, agentKind, orchestratorKind, port, herdrSession",
+      "\nKeys: repoCwd, agentKind, port, herdrSession, wip (actionable-lane WIP target)",
     )
     .action((key: string, value: string, opts) => {
       const { db } = requireInstance(selectedConfig(opts));
