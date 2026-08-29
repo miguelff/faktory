@@ -308,7 +308,7 @@ export async function joinFromInvite(invite: Invite, opts: JoinOptions = {}): Pr
 
   const ui = createPrompter();
   try {
-    console.log(`\n${B("⚙ faktory join")} ${DIM("— connecting to a shared datasource from an invite")}\n`);
+    console.log(`\n${B("⚙ faktory join")} ${DIM("— connecting to a shared datasource from an invite; Ctrl+C aborts")}\n`);
 
     // 1. Config name → ~/.faktory/<slug>/ (own owner id, distinct from the
     //    inviter's). Refuse to reuse an existing config's name: join always
@@ -316,7 +316,7 @@ export async function joinFromInvite(invite: Invite, opts: JoinOptions = {}): Pr
     //    token, or dispatch settings.
     let ref = instanceRef(opts.name ?? (await ui.ask("Config name?", "main")));
     while (listInstances().includes(ref.slug)) {
-      console.log(ERR(`  config "${ref.slug}" already exists — choose a different name`));
+      console.log(ERR(`  config "${ref.slug}" already exists — choose a different name ${DIM("(Ctrl+C to cancel)")}`));
       if (opts.name) throw new Error(`config "${ref.slug}" already exists — pass a new --config name to join`);
       ref = instanceRef(await ui.ask("Config name?", "main"));
     }

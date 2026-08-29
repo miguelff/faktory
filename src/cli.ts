@@ -96,7 +96,11 @@ async function resolveServeConfig(requested: string | undefined): Promise<string
  */
 async function resolveExistingConfig(requested: string | undefined): Promise<string> {
   const configs = listInstances();
-  if (requested) return instanceRef(requested).slug;
+  if (requested) {
+    const slug = instanceRef(requested).slug;
+    if (!configs.includes(slug)) throw new Error(`config "${slug}" does not exist (available: ${configs.join(", ") || "none"})`);
+    return slug;
+  }
   if (configs.length === 0) throw new Error("no configs yet — run faktory serve to set one up");
   if (configs.length === 1) return configs[0]!;
   const ui = createPrompter();
