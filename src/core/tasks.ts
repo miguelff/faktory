@@ -31,9 +31,12 @@ export class TaskStore {
   upsertFromItem(sourceId: string, item: WorkItem): Task {
     const existing = this.bySourceItem(sourceId, item.id);
     if (existing) {
+      // COALESCE keeps a non-null local priority when the source reports null:
+      // sources without a priority property always round-trip null and must not
+      // wipe a value set at creation (which drives list() ordering).
       this.db
         .prepare(
-          "UPDATE tasks SET title = ?, url = ?, priority = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?",
+          "UPDATE tasks SET title = ?, url = ?, priority = COALESCE(?, priority), updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?",
         )
         .run(item.title, item.url, item.priority, existing.id);
       return this.byId(existing.id)!;

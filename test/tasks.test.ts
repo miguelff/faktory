@@ -32,6 +32,18 @@ test("upsert discovers once, refreshes afterwards", () => {
   assert.equal(store.list().length, 1);
 });
 
+test("upsert does not wipe a non-null priority when the source reports null", () => {
+  const store = makeStore();
+  const t = store.createAt("s1", { ...item, id: "kept", priority: 42 }, "queued", "api");
+  assert.equal(t.priority, 42);
+  // A source with no priority property round-trips null on the next sync.
+  const refreshed = store.upsertFromItem("s1", { ...item, id: "kept", priority: null });
+  assert.equal(refreshed.id, t.id);
+  assert.equal(refreshed.priority, 42, "local priority survives a null source value");
+  // A real source value still updates it.
+  assert.equal(store.upsertFromItem("s1", { ...item, id: "kept", priority: 5 }).priority, 5);
+});
+
 test("createAt inserts a task at a phase with a null -> phase created event", () => {
   const store = makeStore();
   const t = store.createAt("s1", { ...item, id: "page-new" }, "queued", "api");
