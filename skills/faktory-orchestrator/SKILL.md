@@ -62,7 +62,11 @@ did), pause briefly, and repeat. Never exit the loop unless told to stop.
 
 ## Repair
 
-For stuck tasks prefer the TUI (`bin/faktory tui`), or force through the API
-only with a clear note: `POST /api/tasks/:id/transition` with
+The datasource (not the local DB) is the source of truth, so `POST /api/sync`
+first — it reconciles each task's phase from the datasource and often unsticks
+things on its own. For what remains, prefer the TUI (`bin/faktory tui`), or
+force through the API with a clear note: `POST /api/tasks/:id/transition` with
 `{ "to": "...", "note": "why", "actor": "orchestrator" }` after verifying the
-real state of the herdr workspace (`herdr api snapshot`).
+real state of the herdr workspace (`herdr api snapshot`). A forced move still
+writes to the datasource (it repairs the source of truth, not just the cache)
+and still refuses to touch an entry another instance owns.
