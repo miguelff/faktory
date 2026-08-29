@@ -1,7 +1,7 @@
 import { parseArgs } from "node:util";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { ensureInstanceDir, instanceRef, listInstances } from "./core/instance.ts";
+import { ensureInstanceDir, instanceRef, listInstances, removeInstance } from "./core/instance.ts";
 import { getConfig, getSecret, openDb, setConfig, setSecret } from "./core/db.ts";
 import { Engine } from "./core/engine.ts";
 import { createSource } from "./sources/factory.ts";
@@ -38,7 +38,9 @@ const FAKTORY_BIN = join(REPO_ROOT, "bin", "faktory");
  *                          agent loop
  *                          (--headless / --no-tui / --no-agent / --session NAME)
  *   setup                  run the wizard standalone (reconfigure without serving)
- *   instances              list configs
+ *   config <verb>          manage configs (CRUD): list | create [name] |
+ *                          delete <name> [--force]  (aliases: ls | new | rm)
+ *   instances              list configs (deprecated alias of `config list`)
  *   source:set-notion      configure the Notion source non-interactively
  *                          (creates the config if it doesn't exist yet)
  *   sync                   pull candidates into the task table
@@ -52,7 +54,11 @@ const FAKTORY_BIN = join(REPO_ROOT, "bin", "faktory");
  *   join <string>          set up a new config linked to a shared datasource (bails on duplicates)
  */
 const HELP = `usage: faktory [config-name]        set up (first run if needed) and start everything
-       faktory <command> [options]  advanced: serve|setup|instances|source:set-notion|sync|tasks|transition|orchestrate|tui|config:set|config:get|invite|join|help`;
+       faktory <command> [options]  advanced: serve|setup|config|instances|source:set-notion|sync|tasks|transition|orchestrate|tui|config:set|config:get|invite|join|help
+
+  config list                    list configs (their prefix, port, and backlog db)
+  config create [name]           create a config (runs the setup wizard)
+  config delete <name> [--force] delete a config and its local state`;
 
 function requireInstance(name: string | undefined) {
   const instances = listInstances();
@@ -76,17 +82,59 @@ async function resolveServeConfig(requested: string | undefined): Promise<string
     console.log(`config "${slug}" does not exist yet — starting setup`);
     return runSetup({ name: requested });
   }
-  if (configs.length === 0) return runSetup();
-  if (configs.length === 1) return configs[0]!;
   const NEW = "(start a new config)";
-  const ui = createPrompter();
-  let choice: string;
-  try {
-    choice = await ui.pick("Which config?", [...configs, NEW], (s) => s);
-  } finally {
-    ui.close();
+  const DELETE = "(delete a config)";
+  // Loop so deleting a config returns to the picker instead of exiting; the
+  // wizard opens its own prompter, so ui is always closed before calling it.
+  while (true) {
+    const current = listInstances();
+    if (current.length === 0) return runSetup();
+    if (current.length === 1) return current[0]!;
+    const ui = createPrompter();
+    let choice: string;
+    try {
+      choice = await ui.pick("Which config?", [...current, NEW, DELETE], (s) => s);
+      if (choice === DELETE) {
+        const CANCEL = "(cancel)";
+        const target = await ui.pick("Delete which config?", [...current, CANCEL], (s) => s, current.length);
+        if (target !== CANCEL) {
+          const ref = instanceRef(target);
+          const ok = isYes(
+            await ui.ask(
+              `Delete "${ref.slug}" and all its local state in ${ref.dir}? Stop any running serve for it first. (y/n)`,
+              "n",
+            ),
+          );
+          if (ok) {
+            removeInstance(ref.slug);
+            console.log(`deleted config "${ref.slug}"`);
+          }
+        }
+        continue;
+      }
+    } finally {
+      ui.close();
+    }
+    return choice === NEW ? runSetup() : choice;
   }
-  return choice === NEW ? runSetup() : choice;
+}
+
+/** One-line summary of a config for `config list`: prefix, port, backlog db. */
+function describeConfig(slug: string): string {
+  const ref = instanceRef(slug);
+  try {
+    const db = openDb(ref.dbPath);
+    try {
+      const src = db.prepare("SELECT config FROM sources LIMIT 1").get() as { config: string } | undefined;
+      const port = getConfig(db, "port") ?? "4600";
+      const dbId = src ? (JSON.parse(src.config).databaseId ?? "?") : "(no source)";
+      return `${slug}\t${ref.prefix}\tport ${port}\t${dbId}`;
+    } finally {
+      db.close();
+    }
+  } catch {
+    return slug;
+  }
 }
 
 /**
@@ -113,6 +161,12 @@ async function resolveExistingConfig(requested: string | undefined): Promise<str
 
 function hasSource(ctx: ReturnType<typeof requireInstance>): boolean {
   return !!ctx.db.prepare("SELECT 1 FROM sources LIMIT 1").get();
+}
+
+/** Accept both "y" and "yes" (case-insensitive) as confirmation. */
+function isYes(answer: string): boolean {
+  const a = answer.trim().toLowerCase();
+  return a === "y" || a === "yes";
 }
 
 /**
@@ -175,6 +229,7 @@ function buildEngine(ctx: ReturnType<typeof requireInstance>) {
 
 const COMMANDS = new Set([
   "setup",
+  "config",
   "instances",
   "source:set-notion",
   "sync",
@@ -229,7 +284,62 @@ async function main() {
       break;
     }
     case "instances": {
+      // deprecated alias of `config list`
       for (const slug of listInstances()) console.log(slug);
+      break;
+    }
+    case "config": {
+      // CRUD over configs (named orchestrations under ~/.faktory/<slug>/).
+      // Distinct from config:get/config:set, which read/write key/value
+      // settings *inside* one config.
+      const [verb, ...verbArgs] = positionals;
+      switch (verb ?? "list") {
+        case "list":
+        case "ls": {
+          const configs = listInstances();
+          if (!configs.length) {
+            console.log("no configs yet \u2014 run faktory config create (or just faktory)");
+            break;
+          }
+          for (const slug of configs) console.log(describeConfig(slug));
+          break;
+        }
+        case "create":
+        case "new": {
+          const name = verbArgs[0] ?? flags.config ?? flags.instance;
+          await runSetup(name ? { name } : {});
+          break;
+        }
+        case "delete":
+        case "remove":
+        case "rm": {
+          const name = verbArgs[0] ?? flags.config ?? flags.instance;
+          if (!name) throw new Error("usage: faktory config delete <name> [--force]");
+          const ref = instanceRef(name);
+          if (!listInstances().includes(ref.slug))
+            throw new Error(`config "${ref.slug}" does not exist (have: ${listInstances().join(", ") || "none"})`);
+          if (!flags.force) {
+            const ui = createPrompter();
+            let ok = false;
+            try {
+              console.log(`Stop any running serve for "${ref.slug}" before deleting \u2014 this removes its SQLite DB and secrets.`);
+              ok = isYes(await ui.ask(`Delete config "${ref.slug}" and all its local state in ${ref.dir}? (y/n)`, "n"));
+            } finally {
+              ui.close();
+            }
+            if (!ok) {
+              console.log("aborted \u2014 nothing deleted");
+              break;
+            }
+          }
+          removeInstance(ref.slug);
+          console.log(`deleted config "${ref.slug}" (${ref.dir})`);
+          console.log("note: Notion ownership tags on already-claimed items are left as-is");
+          break;
+        }
+        default:
+          throw new Error(`unknown config subcommand "${verb}" (use: list | create | delete)`);
+      }
       break;
     }
     case "source:set-notion": {
