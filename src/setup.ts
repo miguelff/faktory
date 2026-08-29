@@ -12,8 +12,8 @@ import type { Invite } from "./core/invite.ts";
 /**
  * Terminal setup wizard. Produces one config under ~/.faktory/<slug>/ (its own
  * SQLite state database, secrets included), tagged with the config name.
- * Serve runs it automatically when no config exists; `faktory setup` re-runs
- * it standalone. Everything has a default; Enter accepts it; Ctrl+C aborts
+ * Serve runs it automatically when no config exists; `faktory config new`
+ * runs it standalone. Everything has a default; Enter accepts it; Ctrl+C aborts
  * safely (nothing half-written until the final confirmation).
  */
 const NOTION = "https://api.notion.com/v1";
@@ -159,38 +159,78 @@ interface PickedDatabase {
   created?: boolean;
 }
 
-async function pickOrCreateDatabase(ui: Prompter, token: string): Promise<PickedDatabase> {
-  console.log(DIM("\n  Looking up databases shared with your integration…"));
+interface NotionRef {
+  id: string;
+  title: string;
+}
+
+async function searchByName(token: string, value: "database" | "page", query: string): Promise<NotionRef[]> {
   const search = await notion(token, "/search", {
     method: "POST",
-    body: JSON.stringify({ filter: { value: "database", property: "object" }, page_size: 25 }),
+    body: JSON.stringify({ query, filter: { value, property: "object" }, page_size: 25 }),
   });
-  const dbs: PickedDatabase[] = (search.results as any[]).map((d) => ({
-    id: d.id as string,
-    title: (d.title ?? []).map((t: any) => t.plain_text).join("") || "(untitled)",
-  }));
-  const CREATE: PickedDatabase = { id: "", title: "(create a new backlog database)" };
-  const choice = dbs.length
-    ? await ui.pick("Which database is the backlog?", [...dbs, CREATE], (d) => (d.id ? `${d.title} ${DIM(d.id)}` : d.title))
-    : CREATE;
-  if (choice.id) return choice;
-
-  if (!dbs.length) console.log(DIM("  No databases are shared with the integration yet — let's create one."));
-  const pages = await notion(token, "/search", {
-    method: "POST",
-    body: JSON.stringify({ filter: { value: "page", property: "object" }, page_size: 25 }),
-  });
-  const parents = (pages.results as any[]).map((p) => ({
-    id: p.id as string,
+  return (search.results as any[]).map((r) => ({
+    id: r.id as string,
     title:
-      Object.values<any>(p.properties ?? {})
-        .find((prop: any) => prop.type === "title")
-        ?.title?.map((t: any) => t.plain_text)
-        .join("") || "(untitled page)",
+      value === "database"
+        ? (r.title ?? []).map((t: any) => t.plain_text).join("") || "(untitled)"
+        : Object.values<any>(r.properties ?? {})
+            .find((prop: any) => prop.type === "title")
+            ?.title?.map((t: any) => t.plain_text)
+            .join("") || "(untitled page)",
   }));
-  if (!parents.length)
-    throw new Error("No pages visible to host the database. Share a page with the integration in Notion (••• → Connections).");
-  const parent = await ui.pick("Which page should host the new database?", parents, (p) => `${p.title} ${DIM(p.id)}`);
+}
+
+async function searchAndPick(ui: Prompter, token: string, value: "database" | "page", what: string): Promise<NotionRef> {
+  while (true) {
+    const query = await ui.ask(`${what} name to search for?`);
+    const results = await searchByName(token, value, query);
+    if (!results.length) {
+      console.log(ERR(`  no ${value}s matching "${query}" are shared with the integration — try another name`));
+      continue;
+    }
+    const AGAIN: NotionRef = { id: "", title: "(search again)" };
+    const choice = await ui.pick(`Which ${value}?`, [...results, AGAIN], (r) => (r.id ? `${r.title} ${DIM(r.id)}` : r.title));
+    if (choice.id) return choice;
+  }
+}
+
+async function createPrivateParentPage(token: string, title: string): Promise<NotionRef> {
+  const created = await notion(token, "/pages", {
+    method: "POST",
+    body: JSON.stringify({
+      parent: { type: "workspace", workspace: true },
+      properties: { title: { title: [{ type: "text", text: { content: title } }] } },
+    }),
+  });
+  return { id: created.id, title };
+}
+
+async function pickParentPage(ui: Prompter, token: string): Promise<NotionRef> {
+  const PRIVATE = "Create a new private page";
+  const SEARCH = "Search for a page by name";
+  const where = await ui.pick("Where should the new database live?", [PRIVATE, SEARCH], (s) => s);
+  if (where === PRIVATE) {
+    const title = await ui.ask("Page name?", "Faktory");
+    try {
+      const page = await createPrivateParentPage(token, title);
+      console.log(OK(`  ✔ created private page "${title}"`));
+      return page;
+    } catch (err) {
+      console.log(ERR(`  could not create a private page (${(err as Error).message})`));
+      console.log(DIM("  Internal integrations can't create workspace-level pages — pick an existing page instead."));
+    }
+  }
+  return searchAndPick(ui, token, "page", "Page");
+}
+
+async function pickOrCreateDatabase(ui: Prompter, token: string): Promise<PickedDatabase> {
+  const SEARCH = "Search for an existing database by name";
+  const CREATE = "Create a new blank database";
+  const how = await ui.pick("Which database is the backlog?", [SEARCH, CREATE], (s) => s);
+  if (how === SEARCH) return searchAndPick(ui, token, "database", "Database");
+
+  const parent = await pickParentPage(ui, token);
   const title = await ui.ask("Database name?", "Faktory Backlog");
   const created = await notion(token, "/databases", {
     method: "POST",
@@ -200,7 +240,7 @@ async function pickOrCreateDatabase(ui: Prompter, token: string): Promise<Picked
       properties: backlogDatabaseProperties(),
     }),
   });
-  console.log(OK(`  ✔ created database "${title}"`));
+  console.log(OK(`  ✔ created database "${title}" in "${parent.title}"`));
   return { id: created.id, title, created: true };
 }
 
@@ -213,7 +253,7 @@ export interface SetupOptions {
 export async function runSetup(opts: SetupOptions = {}): Promise<string> {
   const ui = createPrompter();
   try {
-    console.log(`\n${B("⚙ faktory setup")} ${DIM("— Enter accepts the default, Ctrl+C aborts")}\n`);
+    console.log(`\n${B("⚙ faktory config new")} ${DIM("— Enter accepts the default, Ctrl+C aborts")}\n`);
 
     // 1. Config name → ~/.faktory/<slug>/
     const name = opts.name ?? (await ui.ask("Config name?", "main"));
