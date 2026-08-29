@@ -166,6 +166,7 @@ export class Tui {
         if (key.name === "a") this.toggle("archived");
         if (key.name === "return" && this.selected()) this.mode = "detail";
         if (key.name === "t" && this.selected()) this.mode = "transition";
+        if (key.name === "u" && this.selected()) return this.unblock();
         if (key.name === "s") return this.sync();
         if (key.name === "r") this.refresh("Reloaded");
         this.clampCursor();
@@ -173,6 +174,7 @@ export class Tui {
       case "detail":
         if (key.name === "q" || key.name === "escape") this.mode = "board";
         if (key.name === "t") this.mode = "transition";
+        if (key.name === "u") return this.unblock();
         break;
       case "transition": {
         if (key.name === "q" || key.name === "escape") {
@@ -184,8 +186,11 @@ export class Tui {
         const legal = TRANSITIONS[task.phase];
         const idx = Number(key.sequence) - 1;
         if (idx >= 0 && idx < legal.length) await this.transitionTo(task, legal[idx]!, false);
-        if (key.sequence && /^[A-Z]$/.test(key.sequence)) {
-          const phase = PHASES.find((p) => p.startsWith(key.sequence!.toLowerCase()));
+        // Force-repair to ANY phase via an unambiguous letter map (A..H →
+        // PHASES order). First-letter matching can't work: to_shape/to_execute/
+        // to_review all start with "t".
+        if (key.sequence && /^[A-H]$/.test(key.sequence)) {
+          const phase = PHASES[key.sequence.charCodeAt(0) - 65];
           if (phase) await this.transitionTo(task, phase, true);
         }
         break;
@@ -231,6 +236,21 @@ export class Tui {
     await this.withSpinner("Syncing", async () => {
       const fresh = await this.engine.syncCandidates();
       this.refresh(fresh.length ? `Discovered ${fresh.length} new task(s)` : "Up to date");
+    });
+    this.render();
+  }
+
+  /** Unblock a blocked task back to the lane it came from (consumes resumePhase). */
+  private async unblock(): Promise<void> {
+    const task = this.selected();
+    if (!task || task.phase !== "blocked") {
+      this.message = "only a blocked task can be unblocked";
+      return this.render();
+    }
+    const to = task.resumePhase ?? "backlog";
+    await this.withSpinner(`#${task.id} unblock → ${to}`, async () => {
+      await this.engine.transition(task.id, to, "tui", "unblocked");
+      this.refresh(`#${task.id} unblocked → ${to}`);
     });
     this.render();
   }
@@ -291,7 +311,7 @@ export class Tui {
     for (const e of this.feed) lines.push("  " + this.feedLine(e, cols - 4));
     for (let i = this.feed.length; i < FEED_LINES; i++) lines.push("");
     lines.push(
-      C.dim(" h/l column · j/k card · enter detail · t transition · s sync · d done · a archived · q quit"),
+      C.dim(" h/l column · j/k card · enter detail · t transition · u unblock · s sync · d done · a archived · q quit"),
     );
   }
 
@@ -369,9 +389,16 @@ export class Tui {
       const legal = TRANSITIONS[t.phase];
       lines.push(C.bold("   transition to:"));
       legal.forEach((p, i) => lines.push(`     ${C.accent(String(i + 1))}  ${PHASE_LABEL[p]}`));
-      lines.push(C.dim("   or SHIFT+<letter> to force-repair to any phase · esc back"));
+      lines.push("");
+      lines.push(C.dim("   force-repair (SHIFT):"));
+      lines.push(
+        "   " +
+          PHASES.map((p, i) => `${C.accent(String.fromCharCode(65 + i))} ${PHASE_LABEL[p]}`).join("  "),
+      );
+      lines.push(C.dim("   esc back"));
     } else {
-      lines.push(C.dim(" t transition · esc back · q board"));
+      const unblock = t.phase === "blocked" ? " · u unblock" : "";
+      lines.push(C.dim(` t transition${unblock} · esc back · q board`));
     }
   }
 }

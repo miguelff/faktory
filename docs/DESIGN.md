@@ -164,11 +164,14 @@ Archiving a task closes its space (`workspace.close`), taking its conversations
 with it.
 
 **Attention.** herdr models agent status as `idle | working | blocked | done |
-unknown`. The loop reconciles this against the inbox: `blocked` → the task is
-blocked (needs a human) regardless of the inbox; `idle`/`done` with a matching
-`completed` message → apply it; `idle`/`done` with no message → nudge once, then
-flag as stalled after a timeout. Completion is only ever declared by a
-`completed` inbox message — silence is never read as success.
+unknown`. The loop reconciles this against the inbox: herdr-`blocked` or
+`absent` → the task is blocked (needs a human) regardless of the inbox;
+`idle`/`done` with no message → nudge once, then only *flag* it in the feed for
+human attention (an actionable lane like `to_shape` is a live conversation where
+the agent legitimately sits idle, so the session is never torn down). Completion
+is only ever declared by a `completed` inbox message from the current dispatched
+agent — silence is never read as success, and unsigned/mismatched or
+stray-duplicate messages are rejected.
 
 ## Installer & onboarding
 

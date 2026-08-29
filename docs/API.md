@@ -48,9 +48,13 @@ faktory report <id> --config <slug> --sender <agent> --stage <stage> \
   and moves the task to `blocked` until answered.
 - `note` — a handoff annotation with no transition.
 
-Completion is **only** ever declared by a `completed` message. A quiet agent
-with no message is reconciled against herdr state: nudged once, then flagged as
-stalled (→ `blocked`) after a timeout — silence is never read as success.
+Completion is **only** ever declared by a `completed` message, from the task's
+current dispatched agent (unsigned/mismatched messages are rejected). A quiet
+agent is reconciled against herdr state: herdr-`blocked` or `absent` → the task
+is `blocked` for a human; `idle`/`done` with no message → nudged once, then only
+*flagged* in the feed (an actionable lane like `to_shape` is a live human
+conversation, so the session is never torn down on silence). Silence is never
+read as success.
 
 ## Handoff trail
 

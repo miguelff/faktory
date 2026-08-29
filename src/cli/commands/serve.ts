@@ -99,7 +99,11 @@ async function runServe(configArg: string | undefined, opts: ServeOpts): Promise
   }
   const agentKind = opts.agentKind ?? getConfig(ctx.db, "agentKind") ?? "pi";
   const port = Number(opts.port ?? getConfig(ctx.db, "port") ?? 4600);
-  const wip = Number(opts.wip ?? getConfig(ctx.db, "wip") ?? DEFAULT_WIP);
+  // Guard against a non-numeric --wip / stored config: a NaN WIP would make the
+  // loop's `count >= wip` cap always false and flood the lanes with the whole
+  // backlog. Fall back to the default on anything that isn't a valid count.
+  const wipRaw = Number(opts.wip ?? getConfig(ctx.db, "wip") ?? DEFAULT_WIP);
+  const wip = Number.isInteger(wipRaw) && wipRaw >= 0 ? wipRaw : DEFAULT_WIP;
 
   if (!opts.headless) {
     await ensureDependencies([herdrDependency(), harnessDependency(agentKind)]);

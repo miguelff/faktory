@@ -52,6 +52,7 @@ export class Loop {
   /** agentName → first time it was seen quiet without a message (for stall timeout). */
   private quietSince = new Map<string, number>();
   private nudged = new Set<string>();
+  private warned = new Set<string>();
 
   constructor(
     private readonly engine: Engine,
@@ -65,6 +66,7 @@ export class Loop {
     await this.engine.syncCandidates();
     await this.drainInbox();
     await this.reconcileAgents();
+    await this.reapArchived();
     await this.maintainWip();
   }
 
@@ -91,8 +93,18 @@ export class Loop {
     const task = this.engine.tasks.byId(msg.taskId);
     if (!task) return this.reject(msg, "no-task");
 
-    // Origin check: the sender must be the task's current stage agent.
-    if (task.agentName && msg.sender && msg.sender !== task.agentName) {
+    // Origin check. State-changing messages (completed/needs_human) must come
+    // from the task's *current dispatched* stage agent — a verifiable, non-null
+    // sender that matches, on a task that is actually being worked. This closes
+    // two holes: an unsigned message being trusted, and a stray/duplicate
+    // `completed` walking a task through lanes after the agent was detached
+    // (agentName cleared) with no work done.
+    const stateChanging = msg.type === "completed" || msg.type === "needs_human";
+    if (stateChanging) {
+      if (!isWorking(task) || !task.agentName || msg.sender !== task.agentName) {
+        return this.reject(msg, "origin");
+      }
+    } else if (task.agentName && msg.sender && msg.sender !== task.agentName) {
       return this.reject(msg, "sender-mismatch");
     }
 
@@ -147,8 +159,7 @@ export class Loop {
           paneId: null,
           dispatchedAt: null,
         });
-        this.quietSince.delete(msg.sender ?? "");
-        this.nudged.delete(msg.sender ?? "");
+        if (msg.sender) this.forget(msg.sender);
         return this.resolve(msg, "applied");
       }
     }
@@ -176,7 +187,7 @@ export class Loop {
       if (!isWorking(task) || !isStage(task.phase) || !task.agentName || !task.stage) continue;
       const status = await this.dispatcher.agentStatus(task.agentName);
       if (status === "working") {
-        this.quietSince.delete(task.agentName);
+        this.forget(task.agentName);
         continue;
       }
       if (status === "blocked") {
@@ -184,36 +195,70 @@ export class Loop {
         await this.block(task, `agent ${task.agentName} is blocked in herdr`);
         continue;
       }
-      // idle | done | unknown | absent with no inbox message = quiet. The loop
-      // never reads completion from silence: nudge once, then flag after a
-      // timeout. (A real completion arrives via the inbox and clears the stage.)
+      // An agent that vanished from herdr is a hard stall → block for a human.
+      if (status === "absent") {
+        await this.block(task, `stalled: ${task.agentName} is gone from herdr`);
+        this.forget(task.agentName);
+        continue;
+      }
+      // idle | done | unknown = quiet. This is NOT completion (never inferred
+      // from silence) and NOT necessarily a stall: an actionable lane like
+      // to_shape is a live human conversation where the agent legitimately
+      // sits idle waiting for a reply. So we nudge once, then only *flag* it in
+      // the feed for human attention after a timeout — we never tear down a
+      // possibly-active session. A real completion arrives via the inbox.
       const first = this.quietSince.get(task.agentName) ?? this.now();
       this.quietSince.set(task.agentName, first);
-      if (!this.nudged.has(task.agentName) && status !== "absent") {
+      if (!this.nudged.has(task.agentName)) {
         this.nudged.add(task.agentName);
         await this.dispatcher.nudge(
           task.agentName,
-          "You appear to have gone quiet. Send your terminal inbox message (completed or needs_human) now.",
+          "You appear to have gone quiet. If your stage is done send a `completed` inbox message; if you need a human send `needs_human`.",
         );
+        this.engine.feed.append({ taskId: task.id, kind: "stall", actor: "engine", message: `nudged ${task.agentName} to report` });
+        continue;
+      }
+      if (this.now() - first >= this.cfg.stallTimeoutMs && !this.warned.has(task.agentName)) {
+        this.warned.add(task.agentName);
         this.engine.feed.append({
           taskId: task.id,
           kind: "stall",
           actor: "engine",
-          message: `nudged ${task.agentName} to report`,
+          message: `${task.agentName} has been quiet without reporting — may need attention (check its tab)`,
         });
+      }
+    }
+  }
+
+  private forget(agentName: string): void {
+    this.quietSince.delete(agentName);
+    this.nudged.delete(agentName);
+    this.warned.delete(agentName);
+  }
+
+  /**
+   * Close the herdr space of any archived task that still has one — the loop
+   * archives conversations when a task leaves the board. Idempotent: the space
+   * id is cleared once closed.
+   */
+  private async reapArchived(): Promise<void> {
+    for (const task of this.engine.tasks.list("archived")) {
+      if (!task.workspaceId) continue;
+      try {
+        await this.dispatcher.archiveTaskSpace(task);
+      } catch (e) {
+        this.engine.feed.append({ taskId: task.id, kind: "error", actor: "engine", message: `archive failed: ${(e as Error).message}` });
         continue;
       }
-      if (status === "absent" || this.now() - first >= this.cfg.stallTimeoutMs) {
-        await this.block(task, `stalled: ${task.agentName} went quiet without reporting`);
-        this.quietSince.delete(task.agentName);
-        this.nudged.delete(task.agentName);
-      }
+      this.engine.tasks.update(task.id, { workspaceId: null, paneId: null, agentName: null, stage: null, dispatchedAt: null });
+      this.engine.feed.append({ taskId: task.id, kind: "transition", actor: "engine", message: "archived: closed herdr space" });
     }
   }
 
   private async block(task: Task, reason: string): Promise<void> {
     if (task.phase === "blocked") return;
     // Detach the agent: a blocked task is no longer being worked.
+    if (task.agentName) this.forget(task.agentName);
     await this.engine.transition(task.id, "blocked", "engine", reason, {
       resumePhase: task.phase,
       stage: null,
@@ -234,6 +279,8 @@ export class Loop {
     }
 
     // Promote from the backlog, highest priority first, until WIP is reached.
+    // Defensive: a non-finite WIP means "no promotion" (never flood the lanes).
+    const wip = Number.isFinite(this.cfg.wip) ? this.cfg.wip : 0;
     const actionable = () => this.engine.tasks.list().filter((t) => isStage(t.phase)).length;
     const backlog = this.engine.tasks
       .list("backlog")

@@ -171,10 +171,10 @@ test("a message from the wrong sender is rejected, not applied", async () => {
   engine.inbox.enqueue({ taskId: t.id, type: "completed", stage: "to_shape", sender: "impostor", note: "x" });
   await loop.tick();
   assert.equal(engine.tasks.byId(1)!.phase, "to_shape", "unchanged");
-  assert.match(engine.inbox.forTask(1).at(-1)!.outcome!, /rejected:sender-mismatch/);
+  assert.match(engine.inbox.forTask(1).at(-1)!.outcome!, /rejected:origin/);
 });
 
-test("completion is never inferred from silence; a quiet agent is nudged then stalled", async () => {
+test("completion is never inferred from silence; a quiet agent is nudged then flagged", async () => {
   let clock = 0;
   const { engine, source, dispatcher, loop } = harness(3, () => clock);
   source.items = [item("n1", "One", 5)];
@@ -184,12 +184,17 @@ test("completion is never inferred from silence; a quiet agent is nudged then st
   dispatcher.status.set(agent, "idle");
   await loop.tick(); // first quiet sighting → nudge, still in lane
   assert.deepEqual(dispatcher.nudges, [agent]);
-  assert.equal(engine.tasks.byId(1)!.phase, "to_shape", "not moved on silence");
+  assert.equal(engine.tasks.byId(1)!.phase, "to_shape", "never advanced on silence");
 
   clock += 2000; // exceed stallTimeoutMs
   await loop.tick();
-  const after = engine.tasks.byId(1)!;
-  assert.equal(after.phase, "blocked", "flagged for a human after the timeout");
+  // Flagged for a human via the feed, but the (possibly interactive) session is
+  // left intact — silence is never read as completion, nor as a hard failure.
+  assert.equal(engine.tasks.byId(1)!.phase, "to_shape");
+  assert.ok(
+    engine.feed.recent(20).some((e) => e.kind === "stall" && /may need attention/.test(e.message)),
+    "a stall warning is surfaced for human attention",
+  );
 });
 
 test("herdr-blocked surfaces as needs-human regardless of the inbox", async () => {
@@ -200,4 +205,70 @@ test("herdr-blocked surfaces as needs-human regardless of the inbox", async () =
   dispatcher.status.set(agent, "blocked");
   await loop.tick();
   assert.equal(engine.tasks.byId(1)!.phase, "blocked");
+});
+
+test("an idle agent in a live conversation is nudged, never force-blocked", async () => {
+  let clock = 0;
+  const { engine, source, dispatcher, loop } = harness(3, () => clock);
+  source.items = [item("n1", "Shape me", 5)];
+  await loop.tick();
+  const agent = engine.tasks.byId(1)!.agentName!;
+  dispatcher.status.set(agent, "idle"); // shaping agent waiting on the human
+  await loop.tick();
+  clock += 10 * 60_000; // well past the stall timeout
+  await loop.tick();
+  const t = engine.tasks.byId(1)!;
+  assert.equal(t.phase, "to_shape", "an interactive idle agent is not torn down");
+  assert.deepEqual(dispatcher.nudges, [agent], "nudged exactly once");
+});
+
+test("a vanished (absent) agent is a hard stall → blocked", async () => {
+  const { engine, source, dispatcher, loop } = harness(3);
+  source.items = [item("n1", "One", 5)];
+  await loop.tick();
+  const agent = engine.tasks.byId(1)!.agentName!;
+  dispatcher.status.set(agent, "absent");
+  await loop.tick();
+  assert.equal(engine.tasks.byId(1)!.phase, "blocked");
+});
+
+test("a duplicate completed does not walk the task through empty lanes", async () => {
+  const { engine, source, loop } = harness(3);
+  source.items = [item("n1", "One", 5)];
+  await loop.tick();
+  const t = engine.tasks.byId(1)!;
+  // Two completed messages from the same agent in one batch: the first advances
+  // to_shape→to_execute and detaches the agent; the second must be rejected
+  // (no active worker) rather than advancing to_execute→to_review with no work.
+  report(engine, t, "completed", "first");
+  report(engine, t, "completed", "second (stray)");
+  await loop.tick();
+  assert.equal(engine.tasks.byId(1)!.phase, "to_execute", "only advanced one lane");
+  assert.ok(
+    engine.inbox.forTask(1).some((m) => m.note === "second (stray)" && /rejected:origin/.test(m.outcome ?? "")),
+    "the stray completed was rejected",
+  );
+});
+
+test("an unsigned state-changing message is rejected", async () => {
+  const { engine, source, loop } = harness(3);
+  source.items = [item("n1", "One", 5)];
+  await loop.tick();
+  engine.inbox.enqueue({ taskId: 1, type: "completed", stage: "to_shape", sender: null, note: "no sender" });
+  await loop.tick();
+  assert.equal(engine.tasks.byId(1)!.phase, "to_shape", "unsigned completed is not applied");
+  assert.match(engine.inbox.forTask(1).at(-1)!.outcome!, /rejected:origin/);
+});
+
+test("archiving a task closes its herdr space exactly once", async () => {
+  const { engine, source, dispatcher, loop } = harness(3);
+  source.items = [item("n1", "One", 5)];
+  await loop.tick();
+  assert.equal(engine.tasks.byId(1)!.workspaceId, "ws1", "has a space");
+  await engine.transition(1, "archived", "tui", "manual archive");
+  await loop.tick();
+  assert.deepEqual(dispatcher.archived, [1], "space closed");
+  assert.equal(engine.tasks.byId(1)!.workspaceId, null, "space id cleared");
+  await loop.tick();
+  assert.deepEqual(dispatcher.archived, [1], "not closed again");
 });
