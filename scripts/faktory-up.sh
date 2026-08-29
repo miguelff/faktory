@@ -14,19 +14,27 @@ INSTANCE="${2:-fk}"
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 SOCK="$HOME/.config/herdr/sessions/$SESSION/herdr.sock"
 
-if [ "${HERDR_ENV:-}" = "1" ]; then
-  echo "Run this from a plain terminal (or a fresh window), not inside herdr." >&2
-  exit 1
-fi
+# Strip inherited herdr env so the new window is NOT treated as nested herdr.
+# (This script may be launched from within a herdr pane.)
+HERDR_LAUNCH="env -u HERDR_ENV -u HERDR_SOCKET_PATH -u HERDR_WORKSPACE_ID -u HERDR_TAB_ID -u HERDR_PANE_ID herdr"
 
-# 1. Open a new terminal window attached to the named herdr session.
-CMD="cd $(printf %q "$REPO") && herdr --session $(printf %q "$SESSION")"
+# `herdr --session <name>` both creates the session (if new) and attaches (if
+# it already exists), so this handles the "window was closed, server still up"
+# case too.
+CMD="cd $(printf %q "$REPO") && $HERDR_LAUNCH --session $(printf %q "$SESSION")"
 case "${FAKTORY_TERM:-${TERM_PROGRAM:-Terminal}}" in
-  ghostty|Ghostty*) open -na Ghostty --args --working-directory="$REPO" -e "herdr --session $SESSION" ;;
+  ghostty|Ghostty*) open -na Ghostty --args --working-directory="$REPO" -e $HERDR_LAUNCH --session "$SESSION" ;;
   iTerm*)           osascript -e "tell application \"iTerm\" to create window with default profile command \"bash -lc '$CMD'\"" >/dev/null ;;
   *)                osascript -e "tell application \"Terminal\" to do script \"$CMD\"" -e 'tell application "Terminal" to activate' >/dev/null ;;
 esac
 echo "⚙ opened new terminal window with herdr session '$SESSION'"
+
+# If the session server is already running, its panes persist across window
+# close; don't re-split an existing layout.
+if [ -S "$SOCK" ] && env -u HERDR_ENV HERDR_SOCKET_PATH="$SOCK" herdr pane list >/dev/null 2>&1; then
+  echo "⚙ reattached to existing session '$SESSION' (panes preserved)"
+  exit 0
+fi
 
 # 2. Wait for the session server to be ready (socket + a live pane).
 export HERDR_SOCKET_PATH="$SOCK"
