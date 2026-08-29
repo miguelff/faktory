@@ -1,4 +1,4 @@
-import type { Phase, TagRole } from "./types.ts";
+import { PHASES, type Phase } from "./types.ts";
 
 /**
  * The lifecycle state machine as data. Every task phase change must be listed
@@ -22,17 +22,19 @@ export function canTransition(from: Phase, to: Phase): boolean {
   return TRANSITIONS[from].includes(to);
 }
 
-/** Which tag role mirrors each phase in the work source (null = leave tags alone). */
-export const PHASE_TAG_ROLE: Readonly<Partial<Record<Phase, TagRole>>> = {
-  running: "processing",
-  dispatching: "processing",
-  blocked: "stalled",
-  failed: "failed",
-  reviewing: "executed",
-  ready_to_deploy: "review-passed",
-};
+/**
+ * The faktory_status value in the work source per phase. Every entry starts
+ * (and stays) `discoverable` until an instance claims it; from then on the
+ * source mirrors the owning instance's phase verbatim.
+ */
+export const DISCOVERABLE = "discoverable";
 
-/** Derive the concrete tag name for a role from an instance prefix. */
-export function tagForRole(prefix: string, role: TagRole): string {
-  return `${prefix}-${role}`;
+export function statusForPhase(phase: Phase): string {
+  return phase === "discovered" ? DISCOVERABLE : phase;
 }
+
+/** All values faktory_status can take in the source. */
+export const FAKTORY_STATUSES: readonly string[] = [
+  DISCOVERABLE,
+  ...PHASES.filter((p) => p !== "discovered"),
+];

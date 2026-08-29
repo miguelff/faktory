@@ -7,27 +7,24 @@ import { buildCandidateFilter, pageToWorkItem, type NotionSourceConfig } from ".
 
 /**
  * Integration test: the Notion adapter against a fake Notion API server.
- * Exercises pagination, filtering payloads, tag read-modify-write, and status.
+ * Exercises pagination, the ownership candidacy filter, the claim CAS, status
+ * mirroring, and ensureProperties schema provisioning.
  */
 const cfg: NotionSourceConfig = {
   databaseId: "db-1",
-  candidateProperty: "Tags",
-  candidateValue: "faktory-test-execute",
-  statusProperty: "Status",
-  tagsProperty: "Tags",
   priorityProperty: "Priority",
-  excludeStatuses: ["Done", "Discarded"],
 };
 
-function page(id: string, tags: string[], status = "New", priority: number | null = null) {
+function page(id: string, ownedBy: string | null = null, status: string | null = null, priority: number | null = null) {
   return {
     id,
     url: `https://notion.so/${id}`,
     last_edited_time: "2026-01-01T00:00:00Z",
     properties: {
       Name: { type: "title", title: [{ plain_text: `Task ${id}` }] },
-      Status: { type: "status", status: { name: status } },
-      Tags: { type: "multi_select", multi_select: tags.map((name) => ({ name })) },
+      faktory_status: { type: "select", select: status ? { name: status } : null },
+      faktory_owned_by: { type: "rich_text", rich_text: ownedBy ? [{ plain_text: ownedBy }] : [] },
+      faktory_owned_at: { type: "date", date: null },
       Priority: { type: "number", number: priority },
     },
   };
@@ -37,12 +34,14 @@ let server: Server;
 let baseUrl: string;
 const state = {
   pages: new Map<string, any>([
-    ["p1", page("p1", ["faktory-test-execute"], "New", 5)],
-    ["p2", page("p2", ["faktory-test-execute", "misc"], "Build / Do", 1)],
+    ["p1", page("p1", null, null, 5)],
+    ["p2", page("p2", "faktory-test", "running", 1)],
   ]),
   lastQueryFilter: null as unknown,
   patches: [] as Array<{ id: string; body: any }>,
-  dbOptions: [{ name: "misc" }, { name: "faktory-test-execute" }] as Array<{ name: string }>,
+  dbProperties: { Name: { type: "title" } } as Record<string, any>,
+  /** When set, the next owned_by PATCH is overridden — simulates a lost race. */
+  raceWinner: null as string | null,
 };
 
 before(async () => {
@@ -58,13 +57,11 @@ before(async () => {
     const url = req.url!;
 
     if (url === "/databases/db-1" && req.method === "GET") {
-      res.end(
-        JSON.stringify({ properties: { Tags: { type: "multi_select", multi_select: { options: state.dbOptions } } } }),
-      );
+      res.end(JSON.stringify({ properties: state.dbProperties }));
       return;
     }
     if (url === "/databases/db-1" && req.method === "PATCH") {
-      state.dbOptions = body.properties.Tags.multi_select.options;
+      Object.assign(state.dbProperties, body.properties);
       res.end("{}");
       return;
     }
@@ -91,11 +88,16 @@ before(async () => {
       }
       if (req.method === "PATCH") {
         state.patches.push({ id: pageMatch[1]!, body });
-        if (body.properties?.Tags) {
-          p.properties.Tags.multi_select = body.properties.Tags.multi_select;
+        if (body.properties?.faktory_status) {
+          p.properties.faktory_status.select = body.properties.faktory_status.select;
         }
-        if (body.properties?.Status) {
-          p.properties.Status.status = body.properties.Status.status;
+        if (body.properties?.faktory_owned_by) {
+          const winner = state.raceWinner ?? body.properties.faktory_owned_by.rich_text[0]?.text?.content;
+          state.raceWinner = null;
+          p.properties.faktory_owned_by.rich_text = winner ? [{ plain_text: winner }] : [];
+        }
+        if (body.properties?.faktory_owned_at) {
+          p.properties.faktory_owned_at.date = body.properties.faktory_owned_at.date;
         }
       }
       res.end(JSON.stringify(p));
@@ -126,73 +128,88 @@ test("factory rejects unknown kinds", () => {
   );
 });
 
-test("listCandidates paginates and sends the candidacy filter", async () => {
+test("listCandidates paginates and filters to unowned + own entries", async () => {
   const source = makeSource();
   const items = await source.listCandidates();
   assert.equal(items.length, 2);
   assert.deepEqual(items.map((i) => i.title), ["Task p1", "Task p2"]);
   assert.equal(items[0]!.priority, 5);
+  assert.equal(items[0]!.ownedBy, null);
+  assert.equal(items[1]!.ownedBy, "faktory-test");
+  assert.equal(items[1]!.status, "running");
   const filter = state.lastQueryFilter as any;
-  assert.deepEqual(filter.and[0], { property: "Tags", multi_select: { contains: "faktory-test-execute" } });
-  assert.deepEqual(filter.and[1], { property: "Status", status: { does_not_equal: "Done" } });
+  assert.deepEqual(filter.or, [
+    { property: "faktory_owned_by", rich_text: { is_empty: true } },
+    { property: "faktory_owned_by", rich_text: { equals: "faktory-test" } },
+  ]);
 });
 
 test("getItem returns null on 404", async () => {
   const source = makeSource();
   assert.equal(await source.getItem("nope"), null);
-  const item = await source.getItem("p1");
-  assert.equal(item!.status, "New");
+  const item = await source.getItem("p2");
+  assert.equal(item!.status, "running");
 });
 
-test("addTag/removeTag do read-modify-write and are idempotent", async () => {
+test("claim stamps ownership on an unowned entry (CAS win)", async () => {
   const source = makeSource();
   state.patches.length = 0;
-  await source.addTag!("p1", "faktory-test-processing");
-  await source.addTag!("p1", "faktory-test-processing"); // no-op
-  await source.removeTag!("p1", "faktory-test-execute");
-  const tags = state.pages.get("p1").properties.Tags.multi_select.map((o: any) => o.name);
-  assert.deepEqual(tags, ["faktory-test-processing"]);
-  assert.equal(state.patches.length, 2); // second add skipped
+  const owner = await source.claim("p1");
+  assert.equal(owner, "faktory-test");
+  const props = state.pages.get("p1").properties;
+  assert.equal(props.faktory_owned_by.rich_text[0].plain_text, "faktory-test");
+  assert.ok(props.faktory_owned_at.date.start, "owned_at stamped");
 });
 
-test("setStatus patches the status property", async () => {
+test("claim is idempotent for an entry we already own", async () => {
   const source = makeSource();
-  await source.setStatus("p2", "Review");
-  assert.equal(state.pages.get("p2").properties.Status.status.name, "Review");
+  state.patches.length = 0;
+  assert.equal(await source.claim("p1"), "faktory-test");
+  assert.equal(state.patches.length, 0, "no write when already owned");
+});
+
+test("claim reports the winner when the CAS is lost", async () => {
+  state.pages.set("p3", page("p3"));
+  state.raceWinner = "faktory-rival";
+  const source = makeSource();
+  assert.equal(await source.claim("p3"), "faktory-rival");
+});
+
+test("claim refuses to overwrite an entry owned by another instance", async () => {
+  state.pages.set("p4", page("p4", "faktory-rival"));
+  const source = makeSource();
+  state.patches.length = 0;
+  assert.equal(await source.claim("p4"), "faktory-rival");
+  assert.equal(state.patches.length, 0, "no write at all");
+});
+
+test("setStatus patches faktory_status", async () => {
+  const source = makeSource();
+  await source.setStatus("p2", "reviewing");
+  assert.equal(state.pages.get("p2").properties.faktory_status.select.name, "reviewing");
 });
 
 test("pageToWorkItem tolerates missing properties", () => {
   const item = pageToWorkItem({ id: "x", url: "u", properties: {} }, cfg);
   assert.equal(item.title, "(untitled)");
   assert.equal(item.status, null);
-  assert.deepEqual(item.tags, []);
+  assert.equal(item.ownedBy, null);
+  assert.equal(item.ownedAt, null);
 });
 
-test("ensureTags provisions only the missing multi_select options", async () => {
+test("ensureProperties adds only the missing faktory_* columns", async () => {
   const source = makeSource();
-  const created = await source.ensureTags!(["faktory-test-execute", "faktory-test-processing", "faktory-test-stalled"]);
-  assert.deepEqual(created, ["faktory-test-processing", "faktory-test-stalled"]);
-  assert.deepEqual(
-    state.dbOptions.map((o) => o.name),
-    ["misc", "faktory-test-execute", "faktory-test-processing", "faktory-test-stalled"],
-  );
-  const again = await source.ensureTags!(["faktory-test-processing"]);
+  state.dbProperties = { Name: { type: "title" }, faktory_status: { type: "select" } };
+  const created = await source.ensureProperties!();
+  assert.deepEqual(created, ["faktory_owned_by", "faktory_owned_at"]);
+  assert.ok(state.dbProperties.faktory_owned_by.rich_text);
+  assert.ok(state.dbProperties.faktory_owned_at.date);
+  const again = await source.ensureProperties!();
   assert.deepEqual(again, [], "idempotent");
 });
 
-test("buildCandidateFilter skips status exclusions without a status property", () => {
-  const f = buildCandidateFilter({ ...cfg, statusProperty: undefined }) as any;
-  assert.equal(f.and.length, 1);
-});
-
-test("statusType select switches filter and write shapes", async () => {
-  const f = buildCandidateFilter({ ...cfg, statusType: "select" }) as any;
-  assert.deepEqual(f.and[1], { property: "Status", select: { does_not_equal: "Done" } });
-  const source = createSource(
-    { id: "sel", kind: "notion", config: { ...cfg, statusType: "select" } as unknown as Record<string, unknown> },
-    { getSecret: () => "tkn", prefix: "faktory-test", baseUrl },
-  );
-  state.patches.length = 0;
-  await source.setStatus("p1", "Review");
-  assert.deepEqual(state.patches[0]!.body.properties.Status, { select: { name: "Review" } });
+test("buildCandidateFilter honours custom property names", () => {
+  const f = buildCandidateFilter({ ...cfg, ownedByProperty: "owner" }, "faktory-x") as any;
+  assert.deepEqual(f.or[0], { property: "owner", rich_text: { is_empty: true } });
+  assert.deepEqual(f.or[1], { property: "owner", rich_text: { equals: "faktory-x" } });
 });

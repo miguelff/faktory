@@ -17,27 +17,18 @@ export type Phase = (typeof PHASES)[number];
 
 export const TERMINAL_PHASES: readonly Phase[] = ["done", "failed", "cancelled"];
 
-/** Roles a source tag can play. Concrete tag names derive from the instance prefix. */
-export const TAG_ROLES = [
-  "execute",
-  "processing",
-  "stalled",
-  "failed",
-  "executed",
-  "review-passed",
-] as const;
-
-export type TagRole = (typeof TAG_ROLES)[number];
-
 /** A normalized unit of work coming from any source. */
 export interface WorkItem {
   /** Source-native id (Notion page id, GitHub issue node id, Jira key…). */
   id: string;
   title: string;
   url: string;
-  /** Native status label as shown in the source. */
+  /** faktory_status value in the source (null = discoverable). */
   status: string | null;
-  tags: string[];
+  /** Instance that owns the item (faktory_owned_by), null while discoverable. */
+  ownedBy: string | null;
+  /** When ownership was stamped (faktory_owned_at). */
+  ownedAt: string | null;
   /** Larger number = more important. Sources map their own scale. */
   priority: number | null;
   updatedAt: string | null;

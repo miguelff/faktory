@@ -14,8 +14,9 @@ const item: WorkItem = {
   id: "page-1",
   title: "Fix the flux capacitor",
   url: "https://notion.so/page-1",
-  status: "New",
-  tags: [],
+  status: null,
+  ownedBy: null,
+  ownedAt: null,
   priority: 3,
   updatedAt: null,
 };

@@ -1,52 +1,55 @@
+import { setTimeout as sleep } from "node:timers/promises";
 import type { WorkItem } from "../core/types.ts";
+import { FAKTORY_STATUSES } from "../core/lifecycle.ts";
 import type { SourceConfigRecord, SourceContext, WorkSource } from "./types.ts";
 
 /**
  * Notion work source adapter.
  *
- * Candidacy = database + property + value: a page is a candidate when
- * `candidateProperty` (multi_select | select | status | checkbox) matches
- * `candidateValue`, minus archived/terminal rows.
+ * Ownership lives in three faktory-managed properties on the database:
+ *   faktory_status   (select)     — discoverable | <phase>
+ *   faktory_owned_by (rich_text)  — instance prefix that owns the entry
+ *   faktory_owned_at (date)       — when ownership was stamped
+ * Every page is discoverable while faktory_owned_by is empty; claiming is a
+ * best-effort CAS (Notion has no transactions: write, then verify the winner).
  */
 export interface NotionSourceConfig {
   databaseId: string;
-  /** Property that determines candidacy, e.g. "Tags". */
-  candidateProperty: string;
-  /** Value of that property that marks a candidate, e.g. "faktory-omnia-execute". */
-  candidateValue: string;
-  /** Status property written back per phase, e.g. "Status". */
-  statusProperty?: string;
-  /** Notion type of that property. API-created databases can only have "select". Default "status". */
-  statusType?: "status" | "select";
-  /** Multi-select property used for lifecycle mirror tags (often same as candidateProperty). */
-  tagsProperty?: string;
   /** Optional numeric priority property, e.g. "Priority". */
   priorityProperty?: string;
-  /** Native status labels to exclude from candidacy. */
-  excludeStatuses?: string[];
+  /** Property names, fixed by convention but overridable. */
+  statusProperty?: string;
+  ownedByProperty?: string;
+  ownedAtProperty?: string;
   /** Key in the instance secret store holding the token. Default "notion.token". */
   tokenSecret?: string;
 }
 
+export const FAKTORY_STATUS = "faktory_status";
+export const FAKTORY_OWNED_BY = "faktory_owned_by";
+export const FAKTORY_OWNED_AT = "faktory_owned_at";
+
 const NOTION_VERSION = "2022-06-28";
+
+function propNames(cfg: NotionSourceConfig) {
+  return {
+    status: cfg.statusProperty ?? FAKTORY_STATUS,
+    ownedBy: cfg.ownedByProperty ?? FAKTORY_OWNED_BY,
+    ownedAt: cfg.ownedAtProperty ?? FAKTORY_OWNED_AT,
+  };
+}
 
 /** Pure: normalize a Notion page object into a WorkItem. Exported for tests. */
 export function pageToWorkItem(page: any, cfg: NotionSourceConfig): WorkItem {
+  const names = propNames(cfg);
   const props = page.properties ?? {};
   const titleProp: any = Object.values(props).find((p: any) => p?.type === "title");
   const title = (titleProp?.title ?? []).map((t: any) => t.plain_text).join("") || "(untitled)";
 
-  const statusProp = cfg.statusProperty ? props[cfg.statusProperty] : undefined;
-  const status =
-    statusProp?.type === "status"
-      ? (statusProp.status?.name ?? null)
-      : statusProp?.type === "select"
-        ? (statusProp.select?.name ?? null)
-        : null;
-
-  const tagsProp = cfg.tagsProperty ? props[cfg.tagsProperty] : undefined;
-  const tags =
-    tagsProp?.type === "multi_select" ? tagsProp.multi_select.map((o: any) => o.name as string) : [];
+  const status = props[names.status]?.select?.name ?? null;
+  const ownedBy =
+    (props[names.ownedBy]?.rich_text ?? []).map((t: any) => t.plain_text).join("") || null;
+  const ownedAt = props[names.ownedAt]?.date?.start ?? null;
 
   const prioProp = cfg.priorityProperty ? props[cfg.priorityProperty] : undefined;
   const priority = prioProp?.type === "number" ? (prioProp.number ?? null) : null;
@@ -56,38 +59,41 @@ export function pageToWorkItem(page: any, cfg: NotionSourceConfig): WorkItem {
     title,
     url: page.url,
     status,
-    tags,
+    ownedBy,
+    ownedAt,
     priority,
     updatedAt: page.last_edited_time ?? null,
     raw: page,
   };
 }
 
-/** Pure: build the database query filter for candidacy. Exported for tests. */
-export function buildCandidateFilter(cfg: NotionSourceConfig): Record<string, unknown> {
-  const and: Record<string, unknown>[] = [
-    // Property type is config-time knowledge; multi_select "contains" is the
-    // common case (Tags). Select/status/checkbox variants are chosen by shape.
-    { property: cfg.candidateProperty, multi_select: { contains: cfg.candidateValue } },
-  ];
-  const statusKind = cfg.statusType ?? "status";
-  for (const status of cfg.excludeStatuses ?? []) {
-    if (cfg.statusProperty) {
-      and.push({ property: cfg.statusProperty, [statusKind]: { does_not_equal: status } });
-    }
-  }
-  return { and };
+/**
+ * Pure: candidacy filter — every unowned entry (discoverable by anyone) plus
+ * the entries this instance already owns. Exported for tests.
+ */
+export function buildCandidateFilter(cfg: NotionSourceConfig, prefix: string): Record<string, unknown> {
+  const names = propNames(cfg);
+  return {
+    or: [
+      { property: names.ownedBy, rich_text: { is_empty: true } },
+      { property: names.ownedBy, rich_text: { equals: prefix } },
+    ],
+  };
 }
 
 class NotionSource implements WorkSource {
   readonly kind = "notion";
+  private readonly names: ReturnType<typeof propNames>;
 
   constructor(
     readonly id: string,
     private readonly cfg: NotionSourceConfig,
     private readonly token: string,
+    private readonly prefix: string,
     private readonly baseUrl = "https://api.notion.com/v1",
-  ) {}
+  ) {
+    this.names = propNames(cfg);
+  }
 
   private async call(path: string, init?: RequestInit): Promise<any> {
     const res = await fetch(`${this.baseUrl}${path}`, {
@@ -113,7 +119,7 @@ class NotionSource implements WorkSource {
       const body = await this.call(`/databases/${this.cfg.databaseId}/query`, {
         method: "POST",
         body: JSON.stringify({
-          filter: buildCandidateFilter(this.cfg),
+          filter: buildCandidateFilter(this.cfg, this.prefix),
           page_size: 100,
           ...(cursor ? { start_cursor: cursor } : {}),
         }),
@@ -134,67 +140,63 @@ class NotionSource implements WorkSource {
     }
   }
 
-  async setStatus(itemId: string, status: string): Promise<void> {
-    if (!this.cfg.statusProperty) return;
-    const kind = this.cfg.statusType ?? "status";
+  /**
+   * Best-effort CAS: only proceed when the page is unowned, stamp ownership,
+   * then re-read after a short delay — Notion is last-writer-wins, so the
+   * verify read reports whichever instance actually holds the entry.
+   */
+  async claim(itemId: string): Promise<string> {
+    const current = (await this.getItem(itemId))?.ownedBy;
+    if (current) return current;
     await this.call(`/pages/${itemId}`, {
       method: "PATCH",
       body: JSON.stringify({
-        properties: { [this.cfg.statusProperty]: { [kind]: { name: status } } },
+        properties: {
+          [this.names.ownedBy]: { rich_text: [{ type: "text", text: { content: this.prefix } }] },
+          [this.names.ownedAt]: { date: { start: new Date().toISOString() } },
+        },
+      }),
+    });
+    await sleep(150 + Math.random() * 200);
+    return (await this.getItem(itemId))?.ownedBy ?? this.prefix;
+  }
+
+  async setStatus(itemId: string, status: string): Promise<void> {
+    await this.call(`/pages/${itemId}`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        properties: { [this.names.status]: { select: { name: status } } },
       }),
     });
   }
 
-  async addTag(itemId: string, tag: string): Promise<void> {
-    await this.mutateTags(itemId, (tags) => (tags.includes(tag) ? tags : [...tags, tag]));
-  }
-
-  async removeTag(itemId: string, tag: string): Promise<void> {
-    await this.mutateTags(itemId, (tags) => tags.filter((t) => t !== tag));
-  }
-
-  /** Add missing convention tags as options on the tags property (schema update). */
-  async ensureTags(tags: string[]): Promise<string[]> {
-    const prop = this.cfg.tagsProperty ?? this.cfg.candidateProperty;
+  /** Add missing faktory_* properties to the database schema. */
+  async ensureProperties(): Promise<string[]> {
     const db = await this.call(`/databases/${this.cfg.databaseId}`);
-    const options: Array<{ name: string }> = db.properties?.[prop]?.multi_select?.options ?? [];
-    const existing = new Set(options.map((o) => o.name));
-    const missing = tags.filter((t) => !existing.has(t));
+    const existing = db.properties ?? {};
+    const wanted: Record<string, unknown> = {
+      [this.names.status]: { select: { options: FAKTORY_STATUSES.map((name) => ({ name })) } },
+      [this.names.ownedBy]: { rich_text: {} },
+      [this.names.ownedAt]: { date: {} },
+    };
+    const missing = Object.keys(wanted).filter((name) => !existing[name]);
     if (missing.length === 0) return [];
     await this.call(`/databases/${this.cfg.databaseId}`, {
       method: "PATCH",
       body: JSON.stringify({
-        properties: {
-          [prop]: { multi_select: { options: [...options, ...missing.map((name) => ({ name }))] } },
-        },
+        properties: Object.fromEntries(missing.map((name) => [name, wanted[name]])),
       }),
     });
     return missing;
-  }
-
-  /** Notion multi_select PATCH replaces the whole array: read-modify-write. */
-  private async mutateTags(itemId: string, fn: (tags: string[]) => string[]): Promise<void> {
-    const prop = this.cfg.tagsProperty ?? this.cfg.candidateProperty;
-    const page = await this.call(`/pages/${itemId}`);
-    const current: string[] =
-      page.properties?.[prop]?.multi_select?.map((o: any) => o.name as string) ?? [];
-    const next = fn(current);
-    if (next.length === current.length && next.every((t, i) => t === current[i])) return;
-    await this.call(`/pages/${itemId}`, {
-      method: "PATCH",
-      body: JSON.stringify({
-        properties: { [prop]: { multi_select: next.map((name) => ({ name })) } },
-      }),
-    });
   }
 }
 
 export function createNotionSource(record: SourceConfigRecord, ctx: SourceContext): WorkSource {
   const cfg = record.config as unknown as NotionSourceConfig;
-  if (!cfg.databaseId || !cfg.candidateProperty || !cfg.candidateValue) {
-    throw new Error(`notion source ${record.id}: databaseId, candidateProperty and candidateValue are required`);
+  if (!cfg.databaseId) {
+    throw new Error(`notion source ${record.id}: databaseId is required`);
   }
   const token = ctx.getSecret(cfg.tokenSecret ?? "notion.token");
   if (!token) throw new Error(`notion source ${record.id}: missing secret "${cfg.tokenSecret ?? "notion.token"}"`);
-  return new NotionSource(record.id, cfg, token, ctx.baseUrl);
+  return new NotionSource(record.id, cfg, token, ctx.prefix, ctx.baseUrl);
 }

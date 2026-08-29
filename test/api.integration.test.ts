@@ -10,14 +10,16 @@ import type { WorkSource } from "../src/sources/types.ts";
 
 /**
  * Integration test: real SQLite + real HTTP server on an ephemeral port,
- * with an in-memory WorkSource double that records tag/status mirroring.
+ * with an in-memory WorkSource double that records claims and status writes.
  */
 class FakeSource implements WorkSource {
   readonly kind = "fake";
   readonly id = "primary";
   items: WorkItem[] = [];
-  tagOps: string[] = [];
+  owners: Record<string, string> = {};
   statuses: Record<string, string> = {};
+  /** When set, the next claim is lost to this instance. */
+  nextClaimWinner: string | null = null;
 
   async listCandidates() {
     return this.items;
@@ -25,15 +27,19 @@ class FakeSource implements WorkSource {
   async getItem(id: string) {
     return this.items.find((i) => i.id === id) ?? null;
   }
+  async claim(id: string) {
+    if (this.owners[id]) return this.owners[id]!;
+    this.owners[id] = this.nextClaimWinner ?? "faktory-test";
+    this.nextClaimWinner = null;
+    return this.owners[id]!;
+  }
   async setStatus(id: string, status: string) {
     this.statuses[id] = status;
   }
-  async addTag(id: string, tag: string) {
-    this.tagOps.push(`+${id}:${tag}`);
-  }
-  async removeTag(id: string, tag: string) {
-    this.tagOps.push(`-${id}:${tag}`);
-  }
+}
+
+function workItem(id: string, title: string, priority: number): WorkItem {
+  return { id, title, url: `u-${id}`, status: null, ownedBy: null, ownedAt: null, priority, updatedAt: null };
 }
 
 let server: Server;
@@ -43,10 +49,7 @@ const source = new FakeSource();
 before(async () => {
   const db = openDb(":memory:");
   db.prepare("INSERT INTO sources (id, kind, config) VALUES ('primary', 'fake', '{}')").run();
-  const engine = new Engine(db, source, {
-    prefix: "faktory-test",
-    statusByPhase: { running: "Build / Do", reviewing: "Review", done: "Done" },
-  });
+  const engine = new Engine(db, source, { prefix: "faktory-test" });
   server = createApiServer({ engine, prefix: "faktory-test" }); // no herdr: dispatch returns 503
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -73,10 +76,7 @@ test("health reports prefix and phases", async () => {
 });
 
 test("sync discovers candidates as tasks", async () => {
-  source.items = [
-    { id: "n1", title: "One", url: "u1", status: "New", tags: [], priority: 2, updatedAt: null },
-    { id: "n2", title: "Two", url: "u2", status: "New", tags: [], priority: 9, updatedAt: null },
-  ];
+  source.items = [workItem("n1", "One", 2), workItem("n2", "Two", 9)];
   const { body } = await api("/api/sync", { method: "POST" });
   assert.equal(body.discovered.length, 2);
   const again = await api("/api/sync", { method: "POST" });
@@ -100,10 +100,39 @@ test("transition endpoint validates lifecycle and mirrors to the source", async 
   });
   assert.equal(run.body.task.phase, "running");
 
-  // Mirroring: candidacy tag consumed at dispatching, processing tag added, status updated.
-  assert.ok(source.tagOps.includes("-n1:faktory-test-execute"));
-  assert.ok(source.tagOps.includes("+n1:faktory-test-processing"));
-  assert.equal(source.statuses.n1, "Build / Do");
+  // Ownership: claimed when leaving discovered, faktory_status mirrors the phase.
+  assert.equal(source.owners.n1, "faktory-test");
+  assert.equal(source.statuses.n1, "running");
+});
+
+test("a lost claim cancels the local task and returns 409", async () => {
+  source.items = [...source.items, workItem("n3", "Three", 1)];
+  await api("/api/sync", { method: "POST" });
+  const { body: list } = await api("/api/tasks");
+  const t = list.tasks.find((x: any) => x.itemId === "n3");
+  source.nextClaimWinner = "faktory-rival";
+  const res = await api(`/api/tasks/${t.id}/transition`, {
+    method: "POST",
+    body: JSON.stringify({ to: "queued", actor: "test" }),
+  });
+  assert.equal(res.status, 409);
+  const { body: after } = await api(`/api/tasks/${t.id}`);
+  assert.equal(after.task.phase, "cancelled");
+  assert.equal(source.owners.n3, "faktory-rival");
+  assert.equal(source.statuses.n3, undefined, "never wrote to an entry it does not own");
+});
+
+test("sync cancels discovered tasks that were claimed elsewhere", async () => {
+  source.items = [...source.items, workItem("n4", "Four", 1)];
+  await api("/api/sync", { method: "POST" });
+  const { body: list } = await api("/api/tasks");
+  const t = list.tasks.find((x: any) => x.itemId === "n4");
+  assert.equal(t.phase, "discovered");
+  // n4 vanishes from candidacy: another instance owns it now.
+  source.items = source.items.filter((i) => i.id !== "n4");
+  await api("/api/sync", { method: "POST" });
+  const { body: after } = await api(`/api/tasks/${t.id}`);
+  assert.equal(after.task.phase, "cancelled");
 });
 
 test("invalid phase names are rejected", async () => {

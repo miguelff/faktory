@@ -1,19 +1,30 @@
 import type { DatabaseSync } from "node:sqlite";
 import { TaskStore } from "./tasks.ts";
-import type { Phase, Task } from "./types.ts";
-import { PHASE_TAG_ROLE, tagForRole } from "./lifecycle.ts";
+import type { Task } from "./types.ts";
+import type { Phase } from "./types.ts";
+import { statusForPhase } from "./lifecycle.ts";
 import type { WorkSource } from "../sources/types.ts";
 
 /**
- * The deterministic engine: sync candidates from the source, keep source tags
- * and status mirrored to the internal lifecycle. No judgement here — the
- * orchestrator agent (or the API caller) decides *what* to dispatch; this
- * module keeps the books straight.
+ * The deterministic engine: sync candidates from the source and keep the
+ * source's faktory_status mirrored to the internal lifecycle. Ownership rule:
+ * every entry is discoverable by every instance, but only the instance that
+ * won the claim (CAS on faktory_owned_by, performed the moment a task moves
+ * away from discovered) may manage it. No judgement here — the orchestrator
+ * agent (or the API caller) decides *what* to dispatch; this module keeps the
+ * books straight.
  */
 export interface EngineConfig {
   prefix: string; // faktory-<slug>
-  /** Native status label per phase (optional, source-facing). */
-  statusByPhase?: Partial<Record<Phase, string>>;
+}
+
+export class ClaimLostError extends Error {
+  constructor(
+    readonly taskId: number,
+    readonly owner: string,
+  ) {
+    super(`task ${taskId} was claimed by ${owner}`);
+  }
 }
 
 export class Engine {
@@ -27,7 +38,12 @@ export class Engine {
     this.tasks = new TaskStore(db);
   }
 
-  /** Pull the candidate list and upsert tasks. Returns newly discovered tasks. */
+  /**
+   * Pull the candidate list (unowned entries + entries this instance owns)
+   * and upsert tasks. Local `discovered` tasks whose entry disappeared from
+   * candidacy — claimed by another instance, or deleted — are cancelled.
+   * Returns newly discovered tasks.
+   */
   async syncCandidates(): Promise<Task[]> {
     const items = await this.source.listCandidates();
     const fresh: Task[] = [];
@@ -36,37 +52,40 @@ export class Engine {
       const task = this.tasks.upsertFromItem(this.source.id, item);
       if (!existing) fresh.push(task);
     }
+    const seen = new Set(items.map((i) => i.id));
+    for (const task of this.tasks.list("discovered")) {
+      if (!seen.has(task.itemId)) {
+        this.tasks.transition(task.id, "cancelled", "engine", {
+          force: true,
+          note: "no longer discoverable (claimed by another instance or removed)",
+        });
+      }
+    }
     return fresh;
   }
 
   /**
-   * Transition a task and mirror the change to the source:
-   * remove the previous mirror tag, add the new one, update native status.
+   * Transition a task and mirror faktory_status to the source. Leaving
+   * `discovered` first claims ownership (CAS); a lost claim cancels the local
+   * task and throws ClaimLostError.
    */
   async transition(taskId: number, to: Phase, actor: string, note?: string): Promise<Task> {
     const before = this.tasks.byId(taskId);
     if (!before) throw new Error(`task ${taskId} not found`);
+    if (before.phase === "discovered") {
+      // Dropping a discovered task locally touches nothing we don't own.
+      if (to === "cancelled") return this.tasks.transition(taskId, to, actor, { note });
+      const owner = await this.source.claim(before.itemId);
+      if (owner !== this.cfg.prefix) {
+        this.tasks.transition(taskId, "cancelled", "engine", {
+          force: true,
+          note: `claim lost to ${owner}`,
+        });
+        throw new ClaimLostError(taskId, owner);
+      }
+    }
     const task = this.tasks.transition(taskId, to, actor, { note });
-    await this.mirror(before.phase, task);
+    await this.source.setStatus(task.itemId, statusForPhase(task.phase));
     return task;
-  }
-
-  private async mirror(fromPhase: Phase, task: Task): Promise<void> {
-    const { prefix } = this.cfg;
-    const oldRole = PHASE_TAG_ROLE[fromPhase];
-    const newRole = PHASE_TAG_ROLE[task.phase];
-
-    if (this.source.removeTag && oldRole && oldRole !== newRole) {
-      await this.source.removeTag(task.itemId, tagForRole(prefix, oldRole));
-    }
-    // Consume the candidacy tag the moment work starts, preventing double dispatch.
-    if (this.source.removeTag && task.phase === "dispatching") {
-      await this.source.removeTag(task.itemId, tagForRole(prefix, "execute"));
-    }
-    if (this.source.addTag && newRole && newRole !== oldRole) {
-      await this.source.addTag(task.itemId, tagForRole(prefix, newRole));
-    }
-    const status = this.cfg.statusByPhase?.[task.phase];
-    if (status) await this.source.setStatus(task.itemId, status);
   }
 }

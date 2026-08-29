@@ -4,33 +4,36 @@ import type { WorkItem } from "../core/types.ts";
  * The WorkSource port. Faktory's engine only ever talks to this interface;
  * Notion / Jira / GitHub are adapters behind the factory in ./factory.ts.
  *
- * Candidacy is source-specific and lives inside the adapter's config:
- *  - Notion: database id + a property + value (a query filter)
- *  - GitHub (future): repository + issues search query
- *  - Jira   (future): JQL
+ * Ownership model: every entry in the backing database is *discoverable* by
+ * every faktory instance. An instance owns an entry the moment it moves it
+ * away from discoverable — a compare-and-swap on faktory_owned_by — and only
+ * the owning instance may manage it from then on. faktory_status mirrors the
+ * owner's lifecycle phase; faktory_owned_at records when ownership was taken.
  */
 export interface WorkSource {
   readonly kind: string;
   readonly id: string;
 
-  /** Items currently matching the source's candidacy filter. */
+  /** Discoverable (unowned) items plus the items owned by this instance. */
   listCandidates(): Promise<WorkItem[]>;
 
   getItem(itemId: string): Promise<WorkItem | null>;
 
-  /** Write a native status label back to the source. */
+  /**
+   * Claim ownership of an item (CAS): stamp faktory_owned_by/_owned_at only
+   * if it is still unowned. Resolves to the winning owner — equal to this
+   * instance's prefix on success, another prefix when the claim was lost.
+   */
+  claim(itemId: string): Promise<string>;
+
+  /** Write faktory_status back to the source. Only for items this instance owns. */
   setStatus(itemId: string, status: string): Promise<void>;
 
-  /** Tag management (optional capability — not all sources have labels). */
-  addTag?(itemId: string, tag: string): Promise<void>;
-  removeTag?(itemId: string, tag: string): Promise<void>;
-
   /**
-   * Provision the instance's convention tags in the source so they can be
-   * filtered on (Notion rejects queries on unknown multi_select options).
-   * Returns the tags that were newly created.
+   * Add the faktory_* properties to the backing database if missing, so any
+   * database can be pointed at as-is. Returns the properties created.
    */
-  ensureTags?(tags: string[]): Promise<string[]>;
+  ensureProperties?(): Promise<string[]>;
 }
 
 /** Persisted (non-secret) source configuration. */
@@ -45,7 +48,7 @@ export interface SourceConfigRecord {
 export interface SourceContext {
   /** Resolve a secret by key (tokens live in the instance secret store). */
   getSecret(key: string): string | null;
-  /** Instance tag prefix, e.g. `faktory-omnia`. */
+  /** Instance identity stamped into faktory_owned_by, e.g. `faktory-omnia`. */
   prefix: string;
   /** Override the API base URL (used by integration tests). */
   baseUrl?: string;

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { TRANSITIONS, canTransition, tagForRole, PHASE_TAG_ROLE } from "../src/core/lifecycle.ts";
+import { TRANSITIONS, canTransition, statusForPhase, DISCOVERABLE, FAKTORY_STATUSES } from "../src/core/lifecycle.ts";
 import { PHASES, TERMINAL_PHASES } from "../src/core/types.ts";
 
 test("every phase has a transition entry", () => {
@@ -34,13 +34,15 @@ test("illegal jumps are rejected", () => {
   assert.equal(canTransition("done", "queued"), false);
 });
 
-test("tag derivation uses the instance prefix", () => {
-  assert.equal(tagForRole("faktory-omnia", "execute"), "faktory-omnia-execute");
-  assert.equal(tagForRole("faktory-omnia", "review-passed"), "faktory-omnia-review-passed");
+test("discovered mirrors as discoverable, every other phase verbatim", () => {
+  assert.equal(statusForPhase("discovered"), DISCOVERABLE);
+  for (const p of PHASES) {
+    if (p !== "discovered") assert.equal(statusForPhase(p), p);
+  }
 });
 
-test("terminal phases carry no processing mirror", () => {
-  for (const p of TERMINAL_PHASES) {
-    assert.notEqual(PHASE_TAG_ROLE[p], "processing");
-  }
+test("faktory_status covers discoverable plus every non-initial phase", () => {
+  assert.ok(FAKTORY_STATUSES.includes(DISCOVERABLE));
+  for (const p of TERMINAL_PHASES) assert.ok(FAKTORY_STATUSES.includes(p));
+  assert.ok(!FAKTORY_STATUSES.includes("discovered"));
 });
