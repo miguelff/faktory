@@ -40,6 +40,10 @@ export function requireInstance(name: string | undefined): InstanceCtx {
       `--config required (available: ${instances.join(", ") || "none — run faktory serve to set one up"})`,
     );
   const ref = instanceRef(slug);
+  // Fail with guidance rather than a raw "unable to open database file" when a
+  // named config doesn't exist (parity with resolveExistingConfig's message).
+  if (!instances.includes(ref.slug))
+    throw new Error(`config "${ref.slug}" does not exist (available: ${instances.join(", ") || "none"})`);
   const db = openDb(ref.dbPath);
   return { ref, db };
 }

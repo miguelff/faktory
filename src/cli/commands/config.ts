@@ -9,6 +9,7 @@ import {
   removeInstance,
   requireInstance,
 } from "../context.ts";
+import { Option } from "commander";
 import { selectedConfig, withConfigOption } from "../options.ts";
 
 /**
@@ -22,7 +23,7 @@ export function registerConfig(program: Command): void {
   const config = program.command("config").description("manage configs (named orchestrations) and their settings");
 
   config
-    .command("list", { isDefault: true })
+    .command("list")
     .alias("ls")
     .description("list configs with their prefix, port, and backlog db")
     .action(() => {
@@ -38,8 +39,11 @@ export function registerConfig(program: Command): void {
     .command("create [name]")
     .alias("new")
     .description("create a config (runs the setup wizard)")
-    .action(async (name?: string) => {
-      await runSetup(name ? { name } : {});
+    .addOption(new Option("-c, --config <name>", "name for the new config").hideHelp())
+    .addOption(new Option("-i, --instance <name>", "deprecated alias of --config").hideHelp())
+    .action(async (name: string | undefined, opts) => {
+      const resolved = name ?? selectedConfig(opts);
+      await runSetup(resolved ? { name: resolved } : {});
     });
 
   config
