@@ -21,8 +21,10 @@ import { TAG_ROLES } from "./core/types.ts";
  *   transition <id> <to>   move a task through the lifecycle
  *   serve [--port N]       start API + web UI
  *   tui                    inspect / repair state in the terminal
+ *   config:set <k> <v>     persist instance config (repoCwd, agentKind, port, statusByPhase)
+ *   config:get [k]         show instance config
  */
-const HELP = `usage: faktory <init|instances|source:set-notion|sync|tasks|transition|serve|tui> [options]`;
+const HELP = `usage: faktory <init|instances|source:set-notion|sync|tasks|transition|serve|tui|config:set|config:get> [options]`;
 
 function requireInstance(name: string | undefined) {
   const instances = listInstances();
@@ -160,6 +162,23 @@ async function main() {
       });
       const port = Number(flags.port ?? getConfig(ctx.db, "port") ?? 4600);
       server.listen(port, "127.0.0.1", () => console.log(`faktory ${ctx.ref.prefix} on http://127.0.0.1:${port}`));
+      break;
+    }
+    case "config:set": {
+      const { db } = requireInstance(flags.instance);
+      const [key, value] = positionals;
+      if (!key || value === undefined) throw new Error("usage: faktory config:set <key> <value>");
+      setConfig(db, key, value);
+      console.log(`${key} = ${value}`);
+      break;
+    }
+    case "config:get": {
+      const { db } = requireInstance(flags.instance);
+      const key = positionals[0];
+      if (key) console.log(getConfig(db, key) ?? "");
+      else
+        for (const row of db.prepare("SELECT key, value FROM config ORDER BY key").all() as any[])
+          console.log(`${row.key} = ${row.value}`);
       break;
     }
     case "tui": {
