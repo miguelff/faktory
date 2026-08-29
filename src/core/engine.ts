@@ -73,7 +73,13 @@ export class Engine {
    * phase here so every caller (CLI, API, future ones) is protected, not just
    * the HTTP adapter (AGENTS.md "guarding vs validating").
    */
-  async createTask(input: { title: string; phase?: Phase; priority?: number | null; note?: string }): Promise<Task> {
+  async createTask(input: {
+    title: string;
+    phase?: Phase;
+    priority?: number | null;
+    note?: string;
+    actor?: string;
+  }): Promise<Task> {
     const title = input.title?.trim();
     if (!title) throw new Error("title is required");
     const phase = input.phase ?? "queued";
@@ -87,7 +93,10 @@ export class Engine {
       // `discovered` belongs to the shared pool; anything else is ours from birth.
       owned: phase !== "discovered",
     });
-    return this.tasks.createAt(this.source.id, item, phase, "api", input.note);
+    // Keep the requested priority locally even when the source can't store it
+    // (no priorityProperty): tasks.priority drives list() ordering.
+    const priority = input.priority ?? item.priority;
+    return this.tasks.createAt(this.source.id, { ...item, priority }, phase, input.actor ?? "api", input.note);
   }
 
   /**

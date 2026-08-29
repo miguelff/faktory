@@ -121,6 +121,8 @@ test("create makes an owned task in a chosen state, defaulting to queued", async
   assert.equal(source.owners[res.body.task.itemId], "faktory-test");
   const { body: detail } = await api(`/api/tasks/${res.body.task.id}`);
   assert.deepEqual(detail.events.map((e: any) => e.to), ["queued"]);
+  assert.equal(detail.events[0].actor, "api", "API-created tasks are audited as api");
+  assert.equal(detail.events[0].note, "created");
 
   // `discovered` goes to the shared pool: created but left unowned.
   const explicit = await api("/api/tasks", {
@@ -130,6 +132,22 @@ test("create makes an owned task in a chosen state, defaulting to queued", async
   assert.equal(explicit.body.task.phase, "discovered");
   assert.equal(source.owners[explicit.body.task.itemId], undefined, "discovered create stays unowned");
   assert.equal(source.statuses[explicit.body.task.itemId], "discoverable");
+});
+
+test("createTask keeps the requested priority even when the source cannot store it", async () => {
+  // A source whose createItem drops priority (no priorityProperty configured):
+  // the round-tripped item comes back with priority null, but the local task
+  // must keep the requested value so list() ordering still works.
+  const db = openDb(":memory:");
+  db.prepare("INSERT INTO sources (id, kind, config) VALUES ('primary', 'fake', '{}')").run();
+  const src = new FakeSource();
+  const orig = src.createItem.bind(src);
+  src.createItem = async (input) => ({ ...(await orig(input)), priority: null });
+  const engine = new Engine(db, src, { prefix: "faktory-test" });
+  const task = await engine.createTask({ title: "Kept", priority: 42, actor: "cli" });
+  assert.equal(task.priority, 42);
+  assert.equal(engine.tasks.byId(task.id)!.priority, 42);
+  assert.equal(engine.tasks.events(task.id)[0]!.actor, "cli");
 });
 
 test("create rejects empty title, uncreatable/invalid phase, and non-numeric priority", async () => {

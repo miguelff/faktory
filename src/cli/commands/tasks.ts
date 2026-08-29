@@ -20,7 +20,7 @@ export function registerTasks(program: Command): void {
     }
     const ctx = requireInstance(selectedConfig(opts));
     const engine = buildEngine(ctx);
-    const task = await engine.createTask({ title, phase: opts.phase as Phase, priority, note: opts.note });
+    const task = await engine.createTask({ title, phase: opts.phase as Phase, priority, note: opts.note, actor: "cli" });
     console.log(`#${task.id}\t${task.phase}\t${task.title}`);
   });
 

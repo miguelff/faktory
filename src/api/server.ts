@@ -52,14 +52,15 @@ export function createApiServer(deps: ApiDeps): Server {
       return json(res, 400, { error: `${detail} (creatable: ${CREATABLE_PHASES.join(", ")})` });
     }
     let priority: number | null = null;
-    if (body.priority != null) {
+    if (body.priority != null && String(body.priority).trim() !== "") {
       priority = Number(body.priority);
       if (!Number.isFinite(priority)) return json(res, 400, { error: `priority must be a number, got ${JSON.stringify(body.priority)}` });
     }
     try {
-      const task = await deps.engine.createTask({ title: String(body.title), phase, priority, note: body.note });
+      const task = await deps.engine.createTask({ title: String(body.title), phase, priority, note: body.note, actor: body.actor });
       json(res, 201, { task });
     } catch (e) {
+      // Guards above filter bad input; a throw here is a source/I/O failure.
       json(res, 500, { error: String((e as Error).message) });
     }
   });
