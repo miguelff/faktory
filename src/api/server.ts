@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import type { Engine } from "../core/engine.ts";
 import type { Phase } from "../core/types.ts";
 import { PHASES } from "../core/types.ts";
+import { CREATABLE_PHASES, canCreateIn } from "../core/lifecycle.ts";
 import type { HerdrClient } from "../herdr/client.ts";
 import { dispatchTask, type DispatchOptions } from "../herdr/orchestrator.ts";
 
@@ -46,14 +47,17 @@ export function createApiServer(deps: ApiDeps): Server {
     const body = await readJson(req);
     if (!body.title || !String(body.title).trim()) return json(res, 400, { error: "title is required" });
     const phase = (body.phase ?? "queued") as Phase;
-    if (!PHASES.includes(phase)) return json(res, 400, { error: `invalid phase ${JSON.stringify(body.phase)}` });
+    if (!canCreateIn(phase)) {
+      const detail = PHASES.includes(phase) ? `phase ${JSON.stringify(phase)} is not creatable` : `invalid phase ${JSON.stringify(body.phase)}`;
+      return json(res, 400, { error: `${detail} (creatable: ${CREATABLE_PHASES.join(", ")})` });
+    }
+    let priority: number | null = null;
+    if (body.priority != null) {
+      priority = Number(body.priority);
+      if (!Number.isFinite(priority)) return json(res, 400, { error: `priority must be a number, got ${JSON.stringify(body.priority)}` });
+    }
     try {
-      const task = await deps.engine.createTask({
-        title: String(body.title),
-        phase,
-        priority: body.priority ?? null,
-        note: body.note,
-      });
+      const task = await deps.engine.createTask({ title: String(body.title), phase, priority, note: body.note });
       json(res, 201, { task });
     } catch (e) {
       json(res, 500, { error: String((e as Error).message) });

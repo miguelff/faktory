@@ -59,6 +59,12 @@ export interface NewWorkItem {
   status: string;
   /** Optional numeric priority (source maps its own scale). */
   priority?: number | null;
+  /**
+   * Stamp ownership by this instance on creation. `true` for owned entry phases
+   * (e.g. queued); `false` leaves the item in the shared, discoverable pool so
+   * any operator can claim it. Defaults to owned when omitted.
+   */
+  owned?: boolean;
 }
 
 /** Persisted (non-secret) source configuration. */

@@ -159,18 +159,22 @@ class NotionSource implements WorkSource {
   }
 
   /**
-   * Create a page in the backlog database, owned by this instance from birth.
-   * The title lands on whichever property is the database's `title`, so it
-   * works regardless of what that property is named (Name, Task, …).
+   * Create a page in the backlog database. When `owned` (the default) it is
+   * stamped for this instance from birth; when not, it is left unowned so it
+   * stays in the shared, discoverable pool. The title lands on whichever
+   * property is the database's `title`, so it works regardless of what that
+   * property is named (Name, Task, …).
    */
   async createItem(input: NewWorkItem): Promise<WorkItem> {
     const titleProp = await this.titlePropertyName();
     const properties: Record<string, unknown> = {
       [titleProp]: { title: [{ type: "text", text: { content: input.title } }] },
       [this.names.status]: { select: { name: input.status } },
-      [this.names.ownedBy]: { rich_text: [{ type: "text", text: { content: this.prefix } }] },
-      [this.names.ownedAt]: { date: { start: new Date().toISOString() } },
     };
+    if (input.owned !== false) {
+      properties[this.names.ownedBy] = { rich_text: [{ type: "text", text: { content: this.prefix } }] };
+      properties[this.names.ownedAt] = { date: { start: new Date().toISOString() } };
+    }
     if (this.cfg.priorityProperty && input.priority != null) {
       properties[this.cfg.priorityProperty] = { number: input.priority };
     }

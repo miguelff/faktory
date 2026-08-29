@@ -8,19 +8,19 @@ export function registerTasks(program: Command): void {
   withConfigOption(
     program
       .command("create <title>")
-      .description("create a new task in the source (owned by this config) in a chosen state")
-      .option("--phase <phase>", "lifecycle phase to create it in", "queued")
+      .description("create a new task in the source in a chosen state (queued = owned + dispatchable)")
+      .option("--phase <phase>", "phase to create it in (queued or discovered)", "queued")
       .option("--priority <n>", "numeric priority (larger = more important)")
       .option("--note <note>", "note recorded in the audit trail"),
   ).action(async (title: string, opts) => {
+    let priority: number | null = null;
+    if (opts.priority != null) {
+      priority = Number(opts.priority);
+      if (!Number.isFinite(priority)) throw new Error(`--priority must be a number, got ${JSON.stringify(opts.priority)}`);
+    }
     const ctx = requireInstance(selectedConfig(opts));
     const engine = buildEngine(ctx);
-    const task = await engine.createTask({
-      title,
-      phase: opts.phase as Phase,
-      priority: opts.priority != null ? Number(opts.priority) : null,
-      note: opts.note,
-    });
+    const task = await engine.createTask({ title, phase: opts.phase as Phase, priority, note: opts.note });
     console.log(`#${task.id}\t${task.phase}\t${task.title}`);
   });
 

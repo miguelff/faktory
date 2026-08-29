@@ -248,6 +248,17 @@ test("createItem creates a page owned by this instance with the given status", a
   assert.equal(created.Priority.number, 8);
 });
 
+test("createItem with owned:false leaves the entry in the shared, unowned pool", async () => {
+  state.dbProperties = { Name: { type: "title" }, Priority: { type: "number" } };
+  const source = makeSource();
+  const item = await source.createItem({ title: "Shared task", status: "discoverable", owned: false });
+  assert.equal(item.ownedBy, null);
+  assert.equal(item.status, "discoverable");
+  const created = state.pages.get(item.id).properties;
+  assert.equal(created.faktory_owned_by, undefined, "no ownership stamped");
+  assert.equal(created.faktory_owned_at, undefined);
+});
+
 test("setStatus patches faktory_status", async () => {
   const source = makeSource();
   await source.setStatus("p2", "reviewing");

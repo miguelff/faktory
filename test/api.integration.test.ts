@@ -31,18 +31,19 @@ class FakeSource implements WorkSource {
   private created = 0;
   async createItem(input: NewWorkItem) {
     const id = `created-${++this.created}`;
+    const owned = input.owned !== false;
     const item: WorkItem = {
       id,
       title: input.title,
       url: `u-${id}`,
       status: input.status,
-      ownedBy: "faktory-test",
-      ownedAt: new Date().toISOString(),
+      ownedBy: owned ? "faktory-test" : null,
+      ownedAt: owned ? new Date().toISOString() : null,
       priority: input.priority ?? null,
       updatedAt: null,
     };
     this.items.push(item);
-    this.owners[id] = "faktory-test";
+    if (owned) this.owners[id] = "faktory-test";
     this.statuses[id] = input.status;
     return item;
   }
@@ -121,21 +122,27 @@ test("create makes an owned task in a chosen state, defaulting to queued", async
   const { body: detail } = await api(`/api/tasks/${res.body.task.id}`);
   assert.deepEqual(detail.events.map((e: any) => e.to), ["queued"]);
 
+  // `discovered` goes to the shared pool: created but left unowned.
   const explicit = await api("/api/tasks", {
     method: "POST",
     body: JSON.stringify({ title: "Draft only", phase: "discovered" }),
   });
   assert.equal(explicit.body.task.phase, "discovered");
+  assert.equal(source.owners[explicit.body.task.itemId], undefined, "discovered create stays unowned");
+  assert.equal(source.statuses[explicit.body.task.itemId], "discoverable");
 });
 
-test("create rejects an empty title and an invalid phase", async () => {
+test("create rejects empty title, uncreatable/invalid phase, and non-numeric priority", async () => {
   const noTitle = await api("/api/tasks", { method: "POST", body: JSON.stringify({ title: "  " }) });
   assert.equal(noTitle.status, 400);
-  const badPhase = await api("/api/tasks", {
-    method: "POST",
-    body: JSON.stringify({ title: "x", phase: "warp" }),
-  });
+  const badPhase = await api("/api/tasks", { method: "POST", body: JSON.stringify({ title: "x", phase: "warp" }) });
   assert.equal(badPhase.status, 400);
+  // A real phase that just isn't a legal birth phase is also rejected.
+  const notCreatable = await api("/api/tasks", { method: "POST", body: JSON.stringify({ title: "x", phase: "running" }) });
+  assert.equal(notCreatable.status, 400);
+  assert.match(notCreatable.body.error, /creatable: discovered, queued/);
+  const badPriority = await api("/api/tasks", { method: "POST", body: JSON.stringify({ title: "x", priority: "soon" }) });
+  assert.equal(badPriority.status, 400);
 });
 
 test("transition endpoint validates lifecycle and mirrors to the source", async () => {

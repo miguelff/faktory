@@ -2,7 +2,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { TaskStore } from "./tasks.ts";
 import type { Task } from "./types.ts";
 import type { Phase } from "./types.ts";
-import { statusForPhase } from "./lifecycle.ts";
+import { canCreateIn, CREATABLE_PHASES, statusForPhase } from "./lifecycle.ts";
 import { renderHandoff, type Handoff } from "./handoff.ts";
 import type { WorkSource } from "../sources/types.ts";
 
@@ -67,20 +67,27 @@ export class Engine {
 
   /**
    * Create a brand-new work item in the source and record it locally at a
-   * chosen `phase` (default `queued`, so it is immediately dispatchable). The
-   * item is owned by this instance from creation — no claim is needed — and the
-   * source's faktory_status is stamped by the adapter to match the phase.
+   * chosen `phase` (default `queued`, so it is immediately dispatchable and
+   * owned by this instance — no claim needed). `discovered` adds it to the
+   * shared backlog unowned instead. The domain guards both the title and the
+   * phase here so every caller (CLI, API, future ones) is protected, not just
+   * the HTTP adapter (AGENTS.md "guarding vs validating").
    */
   async createTask(input: { title: string; phase?: Phase; priority?: number | null; note?: string }): Promise<Task> {
     const title = input.title?.trim();
     if (!title) throw new Error("title is required");
     const phase = input.phase ?? "queued";
+    if (!canCreateIn(phase)) {
+      throw new Error(`cannot create a task in phase ${JSON.stringify(phase)} (creatable: ${CREATABLE_PHASES.join(", ")})`);
+    }
     const item = await this.source.createItem({
       title,
       status: statusForPhase(phase),
       priority: input.priority ?? null,
+      // `discovered` belongs to the shared pool; anything else is ours from birth.
+      owned: phase !== "discovered",
     });
-    return this.tasks.createOwned(this.source.id, item, phase, "api", input.note);
+    return this.tasks.createAt(this.source.id, item, phase, "api", input.note);
   }
 
   /**

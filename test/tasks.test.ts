@@ -32,6 +32,24 @@ test("upsert discovers once, refreshes afterwards", () => {
   assert.equal(store.list().length, 1);
 });
 
+test("createAt inserts a task at a phase with a null -> phase created event", () => {
+  const store = makeStore();
+  const t = store.createAt("s1", { ...item, id: "page-new" }, "queued", "api");
+  assert.equal(t.phase, "queued");
+  assert.equal(t.itemId, "page-new");
+  assert.equal(t.priority, 3);
+  const events = store.events(t.id);
+  assert.equal(events.length, 1);
+  assert.equal(events[0]!.from, null);
+  assert.equal(events[0]!.to, "queued");
+  assert.equal(events[0]!.actor, "api");
+  assert.equal(events[0]!.note, "created");
+  // A custom note overrides the default.
+  const t2 = store.createAt("s1", { ...item, id: "page-new-2" }, "discovered", "api", "seeded by operator");
+  assert.equal(t2.phase, "discovered");
+  assert.equal(store.events(t2.id)[0]!.note, "seeded by operator");
+});
+
 test("transition enforces the lifecycle and records events", () => {
   const store = makeStore();
   const t = store.upsertFromItem("s1", item);

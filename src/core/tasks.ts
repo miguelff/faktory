@@ -49,11 +49,12 @@ export class TaskStore {
   }
 
   /**
-   * Insert a task the instance created (and therefore already owns) directly at
-   * `phase`, bypassing the discovered→claim path. Logs a `null → phase` audit
-   * event so the trail shows the task was created rather than discovered.
+   * Insert a task the instance created directly at `phase`, bypassing the
+   * discovered→claim path. Logs a `null → phase` audit event so the trail shows
+   * the task was created rather than discovered in the source. Phase legality is
+   * the caller's responsibility (see Engine.createTask / canCreateIn).
    */
-  createOwned(sourceId: string, item: WorkItem, phase: Phase, actor: string, note?: string): Task {
+  createAt(sourceId: string, item: WorkItem, phase: Phase, actor: string, note?: string): Task {
     const res = this.db
       .prepare("INSERT INTO tasks (source_id, item_id, title, url, phase, priority) VALUES (?, ?, ?, ?, ?, ?)")
       .run(sourceId, item.id, item.title, item.url, phase, item.priority);
