@@ -5,7 +5,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, existsSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HerdrClient } from "../src/herdr/client.ts";
-import { bootstrapDetached, TAB_LABELS } from "../src/herdr/bootstrap.ts";
+import { bootstrapDetached, bootstrapWorkbench, TAB_LABELS } from "../src/herdr/bootstrap.ts";
 
 /**
  * Integration test for the workbench bootstrap: a fake herdr socket answers the
@@ -224,4 +224,123 @@ test("reattach restarts a dead tui by reusing its idle named tab", async () => {
   const calls = herdrCalls();
   assert.ok(calls.some((c) => c.includes("pane run ws1:p2") && c.includes("tui --instance fk")));
   assert.ok(!calls.some((c) => c.includes("serve fk")), "serve is left running");
+});
+
+test("reattach relabels running components from the old unlabelled split-pane layout", async () => {
+  handler = (method, params) => {
+    switch (method) {
+      case "workspace.list":
+        return { workspaces: [{ workspace_id: "ws1", label: "faktory:fk" }] };
+      case "pane.list":
+        // Legacy layout: serve + tui share one unlabelled tab as split panes.
+        return {
+          panes: [
+            { pane_id: "ws1:p1", tab_id: "ws1:t1" },
+            { pane_id: "ws1:p2", tab_id: "ws1:t1" },
+          ],
+        };
+      case "tab.list":
+        return { tabs: [{ tab_id: "ws1:t1", label: "faktory" }] };
+      case "pane.process_info": {
+        const cmd =
+          params.pane_id === "ws1:p1"
+            ? "node /repo/src/cli.ts serve --instance fk"
+            : "node /repo/src/cli.ts tui --instance fk";
+        return { process_info: { shell_pid: 1, foreground_processes: [{ pid: 2, cmdline: cmd }] } };
+      }
+      case "agent.list":
+        return { agents: [{ agent_name: "faktory-fk-orchestrator" }] };
+      default:
+        return {};
+    }
+  };
+
+  await bootstrapDetached(client, OPTS);
+
+  // The shared legacy tab is relabelled once (to the first running component);
+  // no new tabs are opened and nothing is (re)run.
+  const renames = requests.filter((r) => r.method === "tab.rename");
+  assert.ok(
+    renames.some((r) => r.params.tab_id === "ws1:t1" && r.params.label === TAB_LABELS.serve),
+    "relabels the legacy tab for the running serve",
+  );
+  assert.ok(!requests.some((r) => r.method === "tab.create"), "no new tabs for running components");
+  assert.deepEqual(herdrCalls(), [], "running components are not restarted");
+});
+
+test("adopt branch resolves the root tab id via pane.get when pane.list omits it", async () => {
+  let renamedRootTab: string | undefined;
+  handler = (method, params) => {
+    switch (method) {
+      case "workspace.list":
+        return { workspaces: [{ workspace_id: "ws1", label: "other" }] };
+      case "pane.list":
+        // Single global pane with NO tab_id (adopt path) triggers the pane.get fallback.
+        return { panes: [{ pane_id: "ws1:p1" }] };
+      case "agent.list":
+        return { agents: [] };
+      case "workspace.rename":
+        return {};
+      case "pane.get":
+        return { pane: { pane_id: params.pane_id, tab_id: "ws1:t1", workspace_id: "ws1" } };
+      case "tab.rename":
+        if (params.label === TAB_LABELS.serve) renamedRootTab = params.tab_id;
+        return {};
+      case "tab.create":
+        return { tab: { tab_id: "ws1:tX" }, root_pane: { pane_id: "ws1:pX" } };
+      case "pane.process_info":
+        return { process_info: { shell_pid: 1, foreground_processes: [{ pid: 1 }] } };
+      case "agent.prompt":
+        return {};
+      default:
+        return {};
+    }
+  };
+
+  const result = await bootstrapDetached(client, { ...OPTS, tui: false, agent: false });
+
+  assert.equal(result.workspaceId, "ws1");
+  assert.equal(result.servePaneId, "ws1:p1", "serve reuses the adopted root pane");
+  assert.equal(renamedRootTab, "ws1:t1", "root tab id came from the pane.get fallback");
+});
+
+test("attached bootstrap labels the serve tab and opens tui + orchestrator tabs", async () => {
+  let nextTab = 2;
+  let nextPane = 2;
+  handler = (method, params) => {
+    switch (method) {
+      case "pane.get":
+        return { pane: { pane_id: params.pane_id, tab_id: "ws1:t1", workspace_id: "ws1" } };
+      case "tab.rename":
+        return {};
+      case "tab.create":
+        return { tab: { tab_id: `ws1:t${nextTab++}` }, root_pane: { pane_id: `ws1:p${nextPane++}` } };
+      case "agent.list":
+        return { agents: [] };
+      case "pane.process_info":
+        return { process_info: { shell_pid: 1, foreground_processes: [{ pid: 1 }] } };
+      case "agent.prompt":
+        return {};
+      default:
+        return {};
+    }
+  };
+
+  const result = await bootstrapWorkbench(client, {
+    ...OPTS,
+    fromPaneId: "ws1:p1",
+    serveTab: true,
+  });
+
+  // serve's own tab is renamed; tui + orchestrator each open a named tab.
+  const rename = requests.find((r) => r.method === "tab.rename");
+  assert.equal(rename?.params.tab_id, "ws1:t1");
+  assert.equal(rename?.params.label, TAB_LABELS.serve);
+  const tabLabels = requests.filter((r) => r.method === "tab.create").map((r) => r.params.label);
+  assert.deepEqual(tabLabels, [TAB_LABELS.tui, TAB_LABELS.orchestrator]);
+  assert.equal(result.tuiPaneId, "ws1:p2");
+  assert.equal(result.agentPaneId, "ws1:p3");
+  // A single pane.get covers both the serve label and the workspace lookup.
+  assert.equal(requests.filter((r) => r.method === "pane.get").length, 1, "no redundant pane.get");
+  assert.ok(!requests.some((r) => r.method === "pane.split"), "must not split panes");
 });

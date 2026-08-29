@@ -12,7 +12,7 @@ import { Tui } from "./tui/tui.ts";
 import { createPrompter, joinFromInvite, runSetup } from "./setup.ts";
 import { datasourceIdentity, decodeInvite, encodeInvite } from "./core/invite.ts";
 import { findConfigLinkingDatasource } from "./collab.ts";
-import { bootstrapDetached, bootstrapWorkbench, labelPaneTab, TAB_LABELS } from "./herdr/bootstrap.ts";
+import { bootstrapDetached, bootstrapWorkbench } from "./herdr/bootstrap.ts";
 import { attachSession, ensureSession, sessionClient, sessionSocketPath, waitForSession } from "./herdr/session.ts";
 import { spawn } from "node:child_process";
 import { ensureDependencies, harnessDependency, herdrDependency } from "./deps.ts";
@@ -452,7 +452,6 @@ async function main() {
         const fromPaneId = process.env.HERDR_PANE_ID;
         if (flags.headless || !herdr || !fromPaneId) return;
         try {
-          await labelPaneTab(herdr, fromPaneId, TAB_LABELS.serve);
           const result = await bootstrapWorkbench(herdr, {
             instance: ctx.ref.slug,
             prefix: ctx.ref.prefix,
@@ -461,6 +460,7 @@ async function main() {
             faktoryBin: FAKTORY_BIN,
             agentKind: orchestratorKind,
             fromPaneId,
+            serveTab: true,
             tui: !flags["no-tui"],
             agent: !flags["no-agent"],
           });

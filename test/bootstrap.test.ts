@@ -20,7 +20,7 @@ test("isTuiProcess recognises a running faktory tui", () => {
   assert.ok(!isTuiProcess("node /repo/src/cli.ts serve --instance fk"));
 });
 
-test("paneIdOf accepts both pane.split response shapes", () => {
+test("paneIdOf accepts both pane response shapes (pane.split and tab.create)", () => {
   assert.equal(paneIdOf({ pane: { pane_id: "w1:p2" } }), "w1:p2");
   assert.equal(paneIdOf({ pane: { id: "w1:p3" } }), "w1:p3");
   assert.throws(() => paneIdOf({}), /no pane id/);
