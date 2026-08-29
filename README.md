@@ -35,7 +35,7 @@ one**, then repo/harness/port defaults. Re-run the wizard any time with
 Scripted setup is still available:
 
 ```sh
-bin/faktory source:set-notion \
+bin/faktory source set-notion \
   --config omnia \
   --database 328433c39871805dace6eae8987ce6c3 \
   --priority-property Priority \
@@ -52,12 +52,16 @@ Only the owner manages the entry from then on, mirroring its lifecycle phase
 into `faktory_status`. Share the database with your Notion integration or the
 API returns 404.
 
-Optional per-config settings (stored in the config's state DB):
+Optional per-config settings (stored in the config's state DB) are read/written
+with `config get`/`config set`:
 
 ```sh
-# where /kickoff worktrees are created from, and which agent runs them
-bin/faktory transition --help   # see CLI usage
+bin/faktory config set repoCwd /path/to/repo --config omnia  # where /kickoff worktrees are cut
+bin/faktory config set agentKind pi          --config omnia  # harness that runs /kickoff
+bin/faktory config get                       --config omnia  # print all settings
 ```
+
+Keys: `repoCwd`, `agentKind`, `orchestratorKind`, `port`, `herdrSession`.
 
 ## Collaborate
 
@@ -150,6 +154,37 @@ The `serve` picker can also delete a config when several exist.
 - **Dispatch** requires running inside herdr (`HERDR_SOCKET_PATH` set): it
   creates a git worktree (`faktory-<slug>/<task>-<title>` branch), starts an
   agent in the new workspace pane, and prompts it with `/kickoff <issue-url>`.
+
+## CLI
+
+The CLI is built on [Commander](https://github.com/tj/commander.js): every
+command is self-describing, so help and usage are generated (never
+hand-maintained) and stay in sync with behavior. It is **non-interactive by
+default** — running `bin/faktory` with no arguments prints the subcommands and
+options and exits, instead of doing anything:
+
+```sh
+bin/faktory                 # list subcommands + global options
+bin/faktory <command> -h    # options for one command (e.g. bin/faktory transition -h)
+```
+
+Every config-scoped command takes `-c, --config <name>` (the deprecated
+`-i, --instance` is a hidden alias). Command surface:
+
+| Command | What it does |
+|---------|--------------|
+| `serve [config]` | set up if needed, then start everything (API, board, herdr, TUI, orchestrator) |
+| `setup` | run the setup wizard standalone |
+| `config list\|create\|delete` | manage configs (named orchestrations) |
+| `config get\|set` | read/write a config's settings |
+| `source set-notion` | configure the Notion source non-interactively |
+| `sync` / `tasks` / `transition` | pull candidates, list tasks, move a task through the lifecycle |
+| `tui` | terminal inspector / repair |
+| `orchestrate` | (re)start just the orchestrator agent loop |
+| `invite` / `join` | share / link a datasource across operators |
+
+Adding a command is one file under `src/cli/commands/` plus one register call
+in `src/cli/index.ts` (see `AGENTS.md` → "CLI structure").
 
 ## Lifecycle
 

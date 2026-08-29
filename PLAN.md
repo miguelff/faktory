@@ -30,12 +30,14 @@ every database entry is discoverable; an instance claims it (CAS on
 2. ☐ **PR detection** — after kickoff finishes, capture the PR URL (from
    `agent.read --source recent-unwrapped` or `gh pr view --json url`) into
    `tasks.pr_url`. *Acceptance: PR link visible on board + in Notion.*
-3. ☑ **Setup wizard in `faktory` itself** — bare `faktory [config]` is the
+3. ☑ **Setup wizard in `faktory` itself** — `faktory serve [config]` is the
    whole product: terminal wizard on first run (Notion OAuth via
    FAKTORY_NOTION_CLIENT_ID/SECRET or token paste, token verification, pick
    **or create** the backlog database, candidacy/status/priority mapping, tag
    provisioning), config picker when several exist, then serve. `--instance`
-   renamed to `--config`; `init` removed (`source:set-notion` auto-creates).
+   renamed to `--config`; `init` removed (`source set-notion` auto-creates).
+   *(CLI refactor: bare `faktory` now prints subcommands+options rather than
+   serving — start with `faktory serve`.)*
 4. ☐ **Notion OAuth flow in the web UI** — public integration; store tokens in
    the instance secret store; datasource picker replaces manual
    `source:set-notion` flags. (CLI-side OAuth shipped with the wizard.)
@@ -65,6 +67,13 @@ every database entry is discoverable; an instance claims it (CAS on
 
 ## Engineering debt / hardening
 
+- ☑ **CLI refactor** — command registry over Commander (`src/cli/`, one file per
+  command); self-documenting help, non-interactive by default (bare `faktory`
+  lists subcommands), colon commands made consistent (`source set-notion`,
+  `config get`/`config set`). Adding a command = one file + one register call.
+  *Behavior note:* command groups now require an explicit subcommand — bare
+  `faktory config` / `faktory source` print their subcommands instead of
+  defaulting to `list` (use `faktory config list`).
 - ☐ Port allocation per instance (config `port`, collision check).
 - ☐ Auth on the HTTP API (localhost token header) before any non-localhost use.
 - ☐ Graceful shutdown of `serve` (close SQLite, unsubscribe).

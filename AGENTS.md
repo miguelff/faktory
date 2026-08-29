@@ -19,8 +19,8 @@ the datasource is shared — state DBs, secrets, ports, and herdr sessions are
 per-config and local. Distinct prefixes guarantee claims never collide across
 operators, so no engine changes are needed to support teams.
 
-Onboarding is `invite`/`join` (`src/cli.ts`, backed by pure encode/decode in
-`src/core/invite.ts`):
+Onboarding is `invite`/`join` (`src/cli/commands/collab.ts`, backed by pure
+encode/decode in `src/core/invite.ts`):
 
 - `faktory invite [config]` prints one opaque, versioned string modelling the
   config's datasource — source kind, adapter config, **and the access secret**.
@@ -39,7 +39,11 @@ broad) so duplicate-join detection keeps working.
 
 - **TypeScript strict, ESM, Node ≥ 24.** No new runtime dependencies without a
   strong reason — we deliberately use `node:sqlite`, `node:http`, `node:net`,
-  `node:test`, and global `fetch`.
+  `node:test`, and global `fetch`. **Sanctioned exception:** `commander` powers
+  the CLI (see "CLI structure" below); the maintainability and
+  self-documenting-help win over a hand-rolled parser was judged worth it. Do
+  not add other CLI/UX libraries (Clack/Inquirer/chalk/etc.) — the setup wizard
+  and TUI stay hand-rolled with `node:readline` and raw ANSI.
 - **Ports & adapters.** The domain (`src/core`) never imports Notion, herdr, or
   HTTP code. External systems are reached through interfaces (`WorkSource`,
   the herdr client) and wired via factories (`src/sources/factory.ts`).
@@ -54,6 +58,36 @@ broad) so duplicate-join detection keeps working.
   a random port). New behavior needs coverage at the same level.
 - **Secrets** never enter git: `.env`, `~/.faktory/<slug>/` are gitignored.
 - Run `pnpm typecheck && pnpm test` before declaring anything done.
+
+## CLI structure
+
+The CLI is a **command registry** over [Commander](https://github.com/tj/commander.js),
+living under `src/cli/`:
+
+- `src/cli.ts` — thin entry (`bin/faktory` execs it; herdr process detection in
+  `src/herdr/bootstrap.ts` matches `cli.ts` in the command line, so the entry
+  file name must not move). It only calls `main()`.
+- `src/cli/index.ts` — `buildProgram()` assembles the program from an array of
+  `register*` functions; `main()` prints help for bare `faktory` and otherwise
+  parses. Commander derives help, usage, and the no-args listing from the same
+  definitions, so nothing drifts.
+- `src/cli/commands/<command>.ts` — one file per top-level command (or command
+  group). Each exports `registerX(program)` that adds the command and keeps its
+  option parsing next to its behavior.
+- `src/cli/context.ts` — shared plumbing (`requireInstance`, `buildEngine`,
+  config resolvers, session helpers). Commands stay thin adapters: parse
+  Commander-validated input, resolve a config, call the domain.
+- `src/cli/options.ts` — `withConfigOption()` / `selectedConfig()` for the
+  shared `--config` selector (`--instance` is a hidden deprecated alias).
+
+**Adding a command** = add one file under `src/cli/commands/`, export a
+`register*` function, and add it to the `registrars` array in
+`src/cli/index.ts`. Add a CLI integration test in `test/cli.integration.test.ts`
+(and update its `TOP_LEVEL` list). Rules: options over positionals except where
+a value is the command's core noun (ids, a config name, an invite string);
+never do interactive prompting when the needed values arrived as flags; hide
+internal (`__provision`) and deprecated (`instances`, `--instance`) surface with
+`{ hidden: true }` / `.hideHelp()`.
 
 ## Design skills (mandatory for UI work)
 
@@ -87,6 +121,7 @@ npx skills check   # update check
 | `src/sources`       | WorkSource port + abstract factory + Notion adapter   |
 | `src/herdr`         | herdr socket client (NDJSON), dispatcher, reconciler  |
 | `src/api`           | HTTP control plane + static web UI                    |
+| `src/cli`           | Commander command registry (one file per command)     |
 | `src/tui`           | terminal inspector/repair                             |
 | `skills/`           | skills teaching orchestrator agents to drive Faktory  |
 | `test/`             | unit + integration tests (node:test)                  |
