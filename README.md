@@ -127,9 +127,9 @@ session preserves panes and restarts only what died. Opt out of the board with
 Other commands:
 
 ```sh
-bin/faktory sync   --config omnia            # pull candidates into the task table
-bin/faktory tasks  --config omnia            # list tasks
-bin/faktory tui    --config omnia            # inspect / repair in the terminal
+bin/faktory task sync --config omnia          # pull candidates into the task table
+bin/faktory task list --config omnia          # list tasks (alias: task ls)
+bin/faktory tui       --config omnia          # inspect / repair in the terminal
 bin/faktory invite omnia                     # share this config's datasource
 bin/faktory join   <string>                  # link a new config to a shared datasource
 ```
@@ -167,7 +167,7 @@ options and exits, instead of doing anything:
 
 ```sh
 bin/faktory                 # list subcommands + global options
-bin/faktory <command> -h    # options for one command (e.g. bin/faktory transition -h)
+bin/faktory <command> -h    # options for one command (e.g. bin/faktory task transition -h)
 ```
 
 Every config-scoped command takes `-c, --config <name>` (the deprecated
@@ -180,7 +180,7 @@ Every config-scoped command takes `-c, --config <name>` (the deprecated
 | `config list\|create\|delete` | manage configs (named orchestrations) |
 | `config get\|set` | read/write a config's settings |
 | `source set-notion` | configure the Notion source non-interactively |
-| `sync` / `tasks` / `transition` | pull candidates, list tasks, move a task through the lifecycle |
+| `task sync\|list\|transition` | pull candidates, list tasks, move a task through the lifecycle |
 | `tui` | terminal kanban board / inspector / repair |
 | `report <id>` | send a typed inbox message (agent → loop channel) |
 | `invite` / `join` | share / link a datasource across operators |

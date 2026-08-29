@@ -3,7 +3,7 @@ import { registerServe } from "./commands/serve.ts";
 import { registerSetup } from "./commands/setup.ts";
 import { registerConfig } from "./commands/config.ts";
 import { registerSource } from "./commands/source.ts";
-import { registerTasks } from "./commands/tasks.ts";
+import { registerTask } from "./commands/task.ts";
 import { registerTui } from "./commands/tui.ts";
 import { registerCollab } from "./commands/collab.ts";
 import { registerReport } from "./commands/report.ts";
@@ -33,7 +33,7 @@ export function buildProgram(): Command {
     registerSetup,
     registerConfig,
     registerSource,
-    registerTasks,
+    registerTask,
     registerTui,
     registerReport,
     registerCollab,
