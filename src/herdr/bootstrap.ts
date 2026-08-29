@@ -173,10 +173,11 @@ export async function startOrchestrator(
 }
 
 /**
- * Detached bootstrap: serve runs outside herdr and owns the session. Sets up a
- * dedicated workspace (labelled faktory:<instance>) whose components each get
- * their own named tab: serve, tui, orchestrator. Idempotent: a session that
- * already has the labelled workspace is reconciled, not rebuilt.
+ * Detached bootstrap: the session is driven over the socket (not from a serve
+ * pane). Sets up a dedicated workspace (labelled faktory:<instance>) whose
+ * components each get their own named tab: serve, tui, orchestrator. When
+ * `serveCommand` is given, serve runs inside its own tab too. Idempotent: a
+ * session that already has the labelled workspace is reconciled, not rebuilt.
  */
 export async function bootstrapDetached(
   herdr: HerdrClient,
