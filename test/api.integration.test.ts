@@ -18,6 +18,7 @@ class FakeSource implements WorkSource {
   items: WorkItem[] = [];
   owners: Record<string, string> = {};
   statuses: Record<string, string> = {};
+  comments: Array<{ id: string; body: string }> = [];
   /** When set, the next claim is lost to this instance. */
   nextClaimWinner: string | null = null;
 
@@ -35,6 +36,9 @@ class FakeSource implements WorkSource {
   }
   async setStatus(id: string, status: string) {
     this.statuses[id] = status;
+  }
+  async comment(id: string, body: string) {
+    this.comments.push({ id, body });
   }
 }
 
@@ -147,6 +151,35 @@ test("task detail includes the audit trail", async () => {
     body.events.map((e: any) => e.to),
     ["discovered", "queued", "dispatching", "running"],
   );
+});
+
+test("comment posts a handoff marker through the source, defaulting status from phase", async () => {
+  source.comments.length = 0;
+  // task 1 is in `running` (see the transition test above); no agentName set.
+  const res = await api("/api/tasks/1/comment", {
+    method: "POST",
+    body: JSON.stringify({ note: "Plan approved, executing.", data: { iteration: 2 } }),
+  });
+  assert.equal(res.status, 200);
+  assert.equal(res.body.ok, true);
+  assert.equal(res.body.body, '<faktory status="running" iteration="2">Plan approved, executing.</faktory>');
+  assert.deepEqual(source.comments.at(-1), {
+    id: "n1",
+    body: '<faktory status="running" iteration="2">Plan approved, executing.</faktory>',
+  });
+});
+
+test("comment on a missing task returns 404", async () => {
+  const res = await api("/api/tasks/9999/comment", {
+    method: "POST",
+    body: JSON.stringify({ note: "hi" }),
+  });
+  assert.equal(res.status, 404);
+});
+
+test("comment with an empty body is rejected", async () => {
+  const res = await api("/api/tasks/1/comment", { method: "POST", body: "{}" });
+  assert.equal(res.status, 400);
 });
 
 test("dispatch without herdr returns 503", async () => {

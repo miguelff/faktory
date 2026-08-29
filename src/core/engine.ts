@@ -3,6 +3,7 @@ import { TaskStore } from "./tasks.ts";
 import type { Task } from "./types.ts";
 import type { Phase } from "./types.ts";
 import { statusForPhase } from "./lifecycle.ts";
+import { renderHandoff, type Handoff } from "./handoff.ts";
 import type { WorkSource } from "../sources/types.ts";
 
 /**
@@ -87,5 +88,22 @@ export class Engine {
     const task = this.tasks.transition(taskId, to, actor, { note });
     await this.source.setStatus(task.itemId, statusForPhase(task.phase));
     return task;
+  }
+
+  /**
+   * Leave a handoff-trail comment on a task's work unit. Missing `agent` and
+   * `status` default to the task's agent name and mirrored phase status, so the
+   * loop can pass just a note. Returns the rendered marker that was posted.
+   */
+  async comment(taskId: number, handoff: Handoff): Promise<string> {
+    const task = this.tasks.byId(taskId);
+    if (!task) throw new Error(`task ${taskId} not found`);
+    const body = renderHandoff({
+      ...handoff,
+      agent: handoff.agent ?? task.agentName,
+      status: handoff.status ?? statusForPhase(task.phase),
+    });
+    await this.source.comment(task.itemId, body);
+    return body;
   }
 }

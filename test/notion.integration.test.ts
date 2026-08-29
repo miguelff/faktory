@@ -39,6 +39,7 @@ const state = {
   ]),
   lastQueryFilter: null as unknown,
   patches: [] as Array<{ id: string; body: any }>,
+  comments: [] as Array<{ pageId: string; text: string }>,
   dbProperties: { Name: { type: "title" } } as Record<string, any>,
   /** When set, the next owned_by PATCH is overridden — simulates a lost race. */
   raceWinner: null as string | null,
@@ -63,6 +64,13 @@ before(async () => {
     if (url === "/databases/db-1" && req.method === "PATCH") {
       Object.assign(state.dbProperties, body.properties);
       res.end("{}");
+      return;
+    }
+    if (req.method === "POST" && url === "/comments") {
+      const pageId = body.parent?.page_id;
+      const text = (body.rich_text ?? []).map((r: any) => r.text?.content ?? "").join("");
+      state.comments.push({ pageId, text });
+      res.end(JSON.stringify({ object: "comment", id: "c1", parent: body.parent }));
       return;
     }
     if (req.method === "POST" && url === "/databases/db-1/query") {
@@ -187,6 +195,14 @@ test("setStatus patches faktory_status", async () => {
   const source = makeSource();
   await source.setStatus("p2", "reviewing");
   assert.equal(state.pages.get("p2").properties.faktory_status.select.name, "reviewing");
+});
+
+test("comment posts the handoff marker to the page comment thread", async () => {
+  const source = makeSource();
+  state.comments.length = 0;
+  const marker = '<faktory agent="pi" status="running">Plan approved.</faktory>';
+  await source.comment("p2", marker);
+  assert.deepEqual(state.comments, [{ pageId: "p2", text: marker }]);
 });
 
 test("pageToWorkItem tolerates missing properties", () => {

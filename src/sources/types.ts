@@ -30,6 +30,14 @@ export interface WorkSource {
   setStatus(itemId: string, status: string): Promise<void>;
 
   /**
+   * Leave a handoff-trail comment on the work item. `body` is a pre-rendered,
+   * provider-agnostic string (see core/handoff.ts) — the adapter only decides
+   * where comments live for its backend (Notion page comments, GitHub issue
+   * comments, …). Only for items this instance owns.
+   */
+  comment(itemId: string, body: string): Promise<void>;
+
+  /**
    * Add the faktory_* properties to the backing database if missing, so any
    * database can be pointed at as-is. Returns the properties created.
    */

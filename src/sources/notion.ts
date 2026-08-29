@@ -170,6 +170,17 @@ class NotionSource implements WorkSource {
     });
   }
 
+  /** Post the handoff marker into the page's comment thread. */
+  async comment(itemId: string, body: string): Promise<void> {
+    await this.call(`/comments`, {
+      method: "POST",
+      body: JSON.stringify({
+        parent: { page_id: itemId },
+        rich_text: [{ type: "text", text: { content: body } }],
+      }),
+    });
+  }
+
   /** Add missing faktory_* properties to the database schema. */
   async ensureProperties(): Promise<string[]> {
     const db = await this.call(`/databases/${this.cfg.databaseId}`);
