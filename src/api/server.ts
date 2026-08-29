@@ -1,6 +1,6 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { Engine } from "../core/engine.ts";
-import type { Phase, Stage } from "../core/types.ts";
+import type { Phase, Role } from "../core/types.ts";
 import { PHASES, STAGES } from "../core/types.ts";
 import { isInboxType } from "../core/inbox.ts";
 
@@ -88,13 +88,13 @@ export function createApiServer(deps: ApiDeps): Server {
     const body = await readJson(req);
     const id = Number(p.id);
     if (!deps.engine.tasks.byId(id)) return json(res, 404, { error: "not found" });
-    if (body.note == null && body.status == null && body.agent == null && body.data == null) {
-      return json(res, 400, { error: "comment requires at least one of note, status, agent, data" });
+    if (body.note == null && body.from == null && body.to == null && body.data == null) {
+      return json(res, 400, { error: "comment requires at least one of note, from, to, data" });
     }
     try {
       const rendered = await deps.engine.comment(id, {
-        agent: body.agent,
-        status: body.status,
+        from: body.from,
+        to: body.to,
         note: body.note,
         data: body.data,
       });
@@ -111,10 +111,10 @@ export function createApiServer(deps: ApiDeps): Server {
     const id = Number(p.id);
     if (!deps.engine.tasks.byId(id)) return json(res, 404, { error: "not found" });
     if (!isInboxType(body.type)) {
-      return json(res, 400, { error: `type must be one of completed | needs_human | note` });
+      return json(res, 400, { error: `type must be one of handoff | note` });
     }
-    const stage = body.stage as Stage | undefined;
-    if (stage != null && !STAGES.includes(stage)) {
+    const stage = body.stage as Role | undefined;
+    if (stage != null && stage !== "unblock" && !(STAGES as readonly string[]).includes(stage)) {
       return json(res, 400, { error: `invalid stage ${JSON.stringify(body.stage)}` });
     }
     const message = deps.engine.inbox.enqueue({

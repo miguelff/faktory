@@ -1,15 +1,15 @@
-import type { InboxMessage, Stage, Task } from "./types.ts";
+import type { InboxMessage, Role, Task } from "./types.ts";
 
 /**
- * Stage prompts — the instructions the loop hands a dispatched agent for each
- * actionable lane. Pure and source-independent: the loop supplies the task, the
- * handoff trail (prior inbox annotations), and the exact `faktory report`
- * command the agent must call to talk back through the inbox.
+ * Role prompts — the instructions the loop hands a dispatched agent for each
+ * actionable lane (shaping, executing, reviewing, merging) plus the interactive
+ * unblocking session it opens on a blocked task. Pure and source-independent:
+ * the loop supplies the task, the handoff trail (prior inbox annotations), and
+ * the exact `faktory report` command the agent must call to talk back.
  *
- * Every stage prompt ends with the same contract: the agent MUST send a typed
- * terminal message (`completed` or `needs_human`) before it goes quiet. The
- * loop never infers completion from silence — a quiet agent with no message is
- * a stall, not a success.
+ * Every prompt ends with the same contract: the agent MUST send a terminal
+ * `handoff` message before it goes quiet. The loop never infers completion
+ * from silence — a quiet agent with no message is a stall, not a success.
  */
 
 export interface StagePromptInput {
@@ -18,12 +18,18 @@ export interface StagePromptInput {
   handoff: InboxMessage[];
   /** Base `faktory report` invocation, already scoped to this task. */
   reportCommand: string;
+  /** Why the task is blocked (unblock role only): the blocking transition's note. */
+  reason?: string | null;
+  /** Lane the task left when it was blocked (unblock role only). */
+  cameFrom?: string | null;
 }
 
-const HUMAN_LABEL: Record<Stage, string> = {
-  to_shape: "shaping",
-  to_execute: "execution",
-  to_review: "review",
+const HUMAN_LABEL: Record<Role, string> = {
+  shape: "shaping",
+  execute: "execution",
+  review: "review",
+  release: "merging",
+  unblock: "unblocking",
 };
 
 function handoffTrail(handoff: InboxMessage[]): string {
@@ -34,26 +40,51 @@ function handoffTrail(handoff: InboxMessage[]): string {
     const data = m.data ? ` ${JSON.stringify(m.data)}` : "";
     return `- ${from} ${m.note ?? ""}${data}`.trimEnd();
   });
-  return ["Handoff from earlier stages (read before you start):", ...lines].join("\n");
+  return ["Handoff trail from earlier stages (read before you start):", ...lines].join("\n");
 }
 
-function contract(stage: Stage, reportCommand: string): string {
+/** Roles that may route the task to blocked (the interactive ones talk to the human directly). */
+const CAN_BLOCK: readonly Role[] = ["execute", "review", "release"];
+
+/** Where each pipeline role sends the task when its work is done. */
+const NEXT: Readonly<Partial<Record<Role, string>>> = {
+  shape: "execute",
+  execute: "review",
+  review: "release",
+  release: "done",
+};
+
+function contract(role: Role, reportCommand: string): string {
+  const next = NEXT[role];
   return [
     "## Reporting back (required)",
     "You are a stage worker. You never move the task yourself and never edit the source.",
     "Everything you send back goes through the Faktory inbox with this command:",
     "",
-    `    ${reportCommand} --type <completed|needs_human> --note "<summary>" [--data '<json>']`,
+    `    ${reportCommand} --type <handoff|note> --note "<summary>" --to <lane> [--data '<json>']`,
     "",
-    "- When your stage is done, send exactly one `completed` message. Put everything",
-    "  the next stage needs (decisions made, open questions, artifacts, pointers) in",
-    "  `--note` and structured fields in `--data` — this becomes the handoff trail.",
-    `- If you need a human decision, send a \`needs_human\` message describing the`,
-    `  question, then wait for the human to answer in this tab. The loop surfaces it`,
-    `  and may move the task to Blocked until it is answered.`,
+    "- Every move is a `handoff`: name the target lane with `--to` and put",
+    "  everything the next role needs (decisions made, open questions, artifacts,",
+    "  pointers) in `--note` and structured fields in `--data`. Every handoff is",
+    "  mirrored to the source as a `<handoff from to>` comment — the papertrail.",
+    ...(next ? [`- When your work here is done, send exactly one handoff with \`--to ${next}\`.`] : []),
+    ...(CAN_BLOCK.includes(role)
+      ? [
+          "- If you hit something only a human can resolve, hand off with `--to blocked`",
+          "  and a note describing exactly what is needed. The loop opens an",
+          "  interactive unblocking session for the human.",
+        ]
+      : [
+          "- You are in an interactive session: ask the human directly in this chat",
+          "  when you need a decision. Whenever you ask and go quiet waiting for the",
+          "  answer, first send a `note` with `--data '{\"awaiting\":\"human\"}'` and the",
+          "  question as `--note` — the board flags the task and the human gets a",
+          "  notification. Any later message clears the flag.",
+        ]),
+    "- A `note` message annotates the papertrail without moving the task.",
     "- Do NOT go quiet without sending one of these. Silence is treated as a stall,",
     "  never as success.",
-    `(stage: ${stage} — ${HUMAN_LABEL[stage]})`,
+    `(role: ${role} — ${HUMAN_LABEL[role]})`,
   ].join("\n");
 }
 
@@ -77,10 +108,15 @@ function shapePrompt(input: StagePromptInput): string {
     "   affected code.",
     "5. Iterate until sign-off — present the draft, incorporate corrections, repeat",
     "   until the human explicitly agrees.",
-    "6. Hand off — on agreement, send a `completed` message whose `--note` carries",
-    "   the shaped spec (context, wanted behavior, acceptance criteria, pointers).",
     "",
-    contract("to_shape", input.reportCommand),
+    "This is an interactive session: the task moves ONLY when the human tells you",
+    "so in this chat — never on your own judgement.",
+    "- Human signs off → hand off with `--to execute`, the `--note` carrying the",
+    "  shaped spec (context, wanted behavior, acceptance criteria, pointers).",
+    "- Human decides it is not ready → hand off with `--to backlog` and a note",
+    "  recording why.",
+    "",
+    contract("shape", input.reportCommand),
   ].join("\n");
 }
 
@@ -100,10 +136,12 @@ function executePrompt(input: StagePromptInput): string {
     "- `pnpm typecheck && pnpm test` must pass before you finish.",
     "- Open (or update) a PR against main when a remote exists; capture the PR URL.",
     "",
-    "When the implementation is complete and green, send a `completed` message with",
-    "a summary of what changed and `--data '{\"pr\":\"<url>\"}'` when a PR exists.",
+    "When the implementation is complete and green, hand off with `--to review`,",
+    "a summary of what changed, and `--data '{\"pr\":\"<url>\"}'` when a PR exists.",
+    "If something goes wrong that only a human can resolve, hand off with",
+    "`--to blocked`.",
     "",
-    contract("to_execute", input.reportCommand),
+    contract("execute", input.reportCommand),
   ].join("\n");
 }
 
@@ -121,20 +159,71 @@ function reviewPrompt(input: StagePromptInput): string {
     "edge cases, test coverage, AGENTS.md compliance, and simplicity.",
     "Collect findings as a numbered list with severity: blocker / should-fix / nit.",
     "",
-    "- If only nits remain, send a `completed` message: review passed, ready.",
-    "- If blockers/should-fix remain, send a `needs_human` message listing them so",
-    "  the loop can route the task back to execution or to a human.",
+    "- All feedback addressed (only nits remain) → hand off with `--to release`.",
+    "- Blockers or should-fix findings remain → hand off with `--to execute`",
+    "  listing them, so execution picks the task back up.",
+    "- Something is wrong that neither lane can fix → hand off with `--to blocked`",
+    "  describing it.",
     "",
-    contract("to_review", input.reportCommand),
+    contract("review", input.reportCommand),
   ].join("\n");
 }
 
-const PROMPTS: Record<Stage, (input: StagePromptInput) => string> = {
-  to_shape: shapePrompt,
-  to_execute: executePrompt,
-  to_review: reviewPrompt,
+function releasePrompt(input: StagePromptInput): string {
+  const { task } = input;
+  return [
+    `# Merge & release this task`,
+    `Task #${task.id}: ${task.title}`,
+    `Source: ${task.url}`,
+    "",
+    handoffTrail(input.handoff),
+    "",
+    "The review passed. Land the change:",
+    "- Rebase the branch on main if needed and make sure CI is green.",
+    "- Merge the PR (or fast-forward main) following the repo's conventions.",
+    "- Run any release/deploy step the repo defines for a merged change.",
+    "",
+    "When the change is merged (and released where applicable), hand off with",
+    "`--to done` summarizing what landed. If merging is not possible (conflicts",
+    "you cannot resolve, failing CI, missing permissions), hand off with",
+    "`--to blocked` describing exactly what is in the way.",
+    "",
+    contract("release", input.reportCommand),
+  ].join("\n");
+}
+
+function unblockPrompt(input: StagePromptInput): string {
+  const { task } = input;
+  return [
+    `# Unblock this task`,
+    `Task #${task.id}: ${task.title}`,
+    `Source: ${task.url}`,
+    "",
+    `Why it is blocked: ${input.reason ?? "(no reason recorded — check the handoff trail and the feed)"}`,
+    ...(input.cameFrom ? [`Lane it was in: ${input.cameFrom}`] : []),
+    "",
+    handoffTrail(input.handoff),
+    "",
+    "This is an interactive unblocking session with the human. Work through the",
+    "blocker together:",
+    "1. Explain, in plain terms, why the task is blocked and what is needed.",
+    "2. Investigate whatever the human asks (code, logs, the source item).",
+    "3. When the human resolves it, route the task where they say with a `handoff`",
+    "   message: `--to <lane>` (usually the lane it was in) and a note recording",
+    "   the resolution. The task moves ONLY on the human's word.",
+    "",
+    contract("unblock", input.reportCommand),
+  ].join("\n");
+}
+
+const PROMPTS: Record<Role, (input: StagePromptInput) => string> = {
+  shape: shapePrompt,
+  execute: executePrompt,
+  review: reviewPrompt,
+  release: releasePrompt,
+  unblock: unblockPrompt,
 };
 
-export function stagePrompt(stage: Stage, input: StagePromptInput): string {
-  return PROMPTS[stage](input);
+export function rolePrompt(role: Role, input: StagePromptInput): string {
+  return PROMPTS[role](input);
 }

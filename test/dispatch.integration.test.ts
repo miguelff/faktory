@@ -73,14 +73,14 @@ function task(overrides: Partial<Task> = {}): Task {
     itemId: "p3",
     title: "Ship it",
     url: "u",
-    phase: "to_shape",
+    phase: "shape",
     priority: 1,
     workspaceId: null,
     paneId: null,
     agentName: null,
     stage: null,
     dispatchedAt: null,
-    resumePhase: null,
+    attentionAt: null,
     branch: null,
     prUrl: null,
     error: null,
@@ -91,7 +91,7 @@ function task(overrides: Partial<Task> = {}): Task {
 }
 
 test("naming helpers are deterministic and namespaced by prefix", () => {
-  assert.equal(stageAgentName("faktory-fk", 3, "to_shape"), "faktory-fk-t3-to_shape");
+  assert.equal(stageAgentName("faktory-fk", 3, "shape"), "faktory-fk-t3-shape");
   assert.equal(taskSpaceLabel("faktory-fk", task()), "faktory-fk:t3");
   assert.match(branchNameFor(task({ title: "Ship it!" }), "faktory-fk"), /^faktory-fk\/3-ship-it$/);
 });
@@ -110,21 +110,21 @@ test("first stage creates the task space (worktree) and reuses its root tab", as
     }
   };
   const d = new HerdrDispatcher(client, "faktory-fk", { agentKind: "pi", repoCwd: "/repo" });
-  const res = await d.dispatchStage(task(), "to_shape", "PROMPT");
+  const res = await d.dispatchStage(task(), "shape", "PROMPT");
 
   assert.equal(res.workspaceId, "ws3");
   assert.equal(res.paneId, "ws3:p1", "first stage reuses the space's root pane");
-  assert.equal(res.agentName, "faktory-fk-t3-to_shape");
+  assert.equal(res.agentName, "faktory-fk-t3-shape");
 
   const wt = requests.find((r) => r.method === "worktree.create")!;
   assert.equal(wt.params.branch, "faktory-fk/3-ship-it");
   assert.equal(wt.params.label, "faktory-fk:t3");
   // The root tab is relabelled for the stage; no extra tab is created.
-  assert.equal(requests.find((r) => r.method === "tab.rename")?.params.label, "to_shape");
+  assert.equal(requests.find((r) => r.method === "tab.rename")?.params.label, "shape");
   assert.ok(!requests.some((r) => r.method === "tab.create"), "first stage reuses the root tab");
 
   const calls = herdrCalls();
-  assert.ok(calls.some((c) => c.includes("agent start faktory-fk-t3-to_shape")));
+  assert.ok(calls.some((c) => c.includes("agent start faktory-fk-t3-shape")));
   assert.ok(requests.some((r) => r.method === "agent.prompt" && r.params.text === "PROMPT"));
 });
 
@@ -141,24 +141,24 @@ test("a later stage opens a new tab in the existing task space", async () => {
   };
   const d = new HerdrDispatcher(client, "faktory-fk", { agentKind: "pi", repoCwd: "/repo" });
   // Task already has a space (from the shaping stage).
-  const res = await d.dispatchStage(task({ workspaceId: "ws3", branch: "faktory-fk/3-ship-it" }), "to_execute", "GO");
+  const res = await d.dispatchStage(task({ workspaceId: "ws3", branch: "faktory-fk/3-ship-it" }), "execute", "GO");
 
   assert.ok(!requests.some((r) => r.method === "worktree.create"), "space already exists");
   const created = requests.find((r) => r.method === "tab.create")!;
   assert.equal(created.params.workspace_id, "ws3");
-  assert.equal(created.params.label, "to_execute");
+  assert.equal(created.params.label, "execute");
   assert.equal(res.paneId, "ws3:p2");
-  assert.equal(res.agentName, "faktory-fk-t3-to_execute");
+  assert.equal(res.agentName, "faktory-fk-t3-execute");
 });
 
 test("agentStatus maps herdr agent state, and absent when the agent is gone", async () => {
   handler = (method) => {
     if (method === "agent.list")
-      return { agents: [{ agent_name: "faktory-fk-t3-to_shape", status: "working" }] };
+      return { agents: [{ agent_name: "faktory-fk-t3-shape", status: "working" }] };
     return {};
   };
   const d = new HerdrDispatcher(client, "faktory-fk", { agentKind: "pi", repoCwd: "/repo" });
-  assert.equal(await d.agentStatus("faktory-fk-t3-to_shape"), "working");
+  assert.equal(await d.agentStatus("faktory-fk-t3-shape"), "working");
   assert.equal(await d.agentStatus("nobody"), "absent");
 });
 

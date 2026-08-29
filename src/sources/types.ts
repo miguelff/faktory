@@ -26,6 +26,12 @@ export interface WorkSource {
    */
   claim(itemId: string): Promise<string>;
 
+  /**
+   * Release ownership of an item this instance owns: clear
+   * faktory_owned_by/_owned_at so it is discoverable to every instance again.
+   */
+  unclaim(itemId: string): Promise<void>;
+
   /** Write faktory_status back to the source. Only for items this instance owns. */
   setStatus(itemId: string, status: string): Promise<void>;
 

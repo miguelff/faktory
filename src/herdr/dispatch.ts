@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { setTimeout as sleep } from "node:timers/promises";
 import type { HerdrClient } from "./client.ts";
-import type { Stage, Task } from "../core/types.ts";
+import type { Role, Task } from "../core/types.ts";
 
 const exec = promisify(execFile);
 
@@ -42,7 +42,7 @@ export function taskSpaceLabel(prefix: string, task: Task): string {
   return `${prefix}:t${task.id}`;
 }
 
-export function stageAgentName(prefix: string, taskId: number, stage: Stage): string {
+export function stageAgentName(prefix: string, taskId: number, stage: Role): string {
   return `${prefix}-t${taskId}-${stage}`;
 }
 
@@ -123,7 +123,7 @@ async function ensureTaskSpace(
 async function openStageTab(
   herdr: HerdrClient,
   workspaceId: string,
-  stage: Stage,
+  stage: Role,
   cwd: string | undefined,
   rootPaneId: string | undefined,
 ): Promise<string> {
@@ -156,7 +156,7 @@ async function openStageTab(
 export async function dispatchStage(
   herdr: HerdrClient,
   task: Task,
-  stage: Stage,
+  stage: Role,
   prompt: string,
   prefix: string,
   opts: DispatchOptions,

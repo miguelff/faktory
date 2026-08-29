@@ -179,6 +179,18 @@ class NotionSource implements WorkSource {
     return (await this.getItem(itemId))?.ownedBy ?? this.prefix;
   }
 
+  async unclaim(itemId: string): Promise<void> {
+    await this.call(`/pages/${itemId}`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        properties: {
+          [this.names.ownedBy]: { rich_text: [] },
+          [this.names.ownedAt]: { date: null },
+        },
+      }),
+    });
+  }
+
   async setStatus(itemId: string, status: string): Promise<void> {
     await this.call(`/pages/${itemId}`, {
       method: "PATCH",

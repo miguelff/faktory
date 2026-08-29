@@ -17,8 +17,9 @@ export function registerReport(program: Command): void {
     program
       .command("report <id>")
       .description("send a typed message to the Faktory inbox (agent → loop channel)")
-      .requiredOption("--type <type>", "completed | needs_human | note")
+      .requiredOption("--type <type>", "handoff | note")
       .option("--note <text>", "human-readable summary / handoff payload")
+      .option("--to <lane>", "target lane for a handoff message (folded into data.to)")
       .option("--data <json>", "structured handoff data as a JSON object")
       .option("--sender <agent>", "herdr agent name (origin check)")
       .option("--stage <stage>", "pipeline stage the message is about")
@@ -27,7 +28,7 @@ export function registerReport(program: Command): void {
     const { db } = requireInstance(selectedConfig(opts));
     const port = Number(opts.port ?? getConfig(db, "port") ?? 4600);
     db.close();
-    let data: unknown;
+    let data: Record<string, unknown> | undefined;
     if (opts.data) {
       try {
         data = JSON.parse(opts.data);
@@ -35,6 +36,7 @@ export function registerReport(program: Command): void {
         throw new Error(`--data must be valid JSON: ${opts.data}`);
       }
     }
+    if (opts.to) data = { ...data, to: opts.to };
     const res = await fetch(`http://127.0.0.1:${port}/api/tasks/${Number(idRaw)}/inbox`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },

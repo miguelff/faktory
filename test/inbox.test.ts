@@ -7,12 +7,13 @@ import { FeedStore } from "../src/core/feed.ts";
 function makeDb() {
   const db = openDb(":memory:");
   db.prepare("INSERT INTO sources (id, kind, config) VALUES ('s1', 'notion', '{}')").run();
-  db.prepare("INSERT INTO tasks (source_id, item_id, title, url, phase) VALUES ('s1','p1','T','u','to_shape')").run();
+  db.prepare("INSERT INTO tasks (source_id, item_id, title, url, phase) VALUES ('s1','p1','T','u','shape')").run();
   return db;
 }
 
 test("isInboxType only accepts the typed message kinds", () => {
-  for (const t of ["completed", "needs_human", "note"]) assert.ok(isInboxType(t));
+  for (const t of ["handoff", "note"]) assert.ok(isInboxType(t));
+  assert.equal(isInboxType("completed"), false);
   assert.equal(isInboxType("done"), false);
   assert.equal(isInboxType(42), false);
 });
@@ -20,9 +21,9 @@ test("isInboxType only accepts the typed message kinds", () => {
 test("enqueue → pending → resolve is the drain cycle", () => {
   const db = makeDb();
   const inbox = new InboxStore(db);
-  const m = inbox.enqueue({ taskId: 1, type: "completed", stage: "to_shape", sender: "a1", note: "done", data: { pr: 9 } });
+  const m = inbox.enqueue({ taskId: 1, type: "handoff", stage: "shape", sender: "a1", note: "done", data: { pr: 9, to: "execute" } });
   assert.equal(m.appliedAt, null);
-  assert.deepEqual(m.data, { pr: 9 });
+  assert.deepEqual(m.data, { pr: 9, to: "execute" });
 
   assert.equal(inbox.pending().length, 1);
   inbox.resolve(m.id, "applied");
@@ -34,7 +35,7 @@ test("forTask returns the full handoff trail in order", () => {
   const db = makeDb();
   const inbox = new InboxStore(db);
   inbox.enqueue({ taskId: 1, type: "note", note: "first" });
-  inbox.enqueue({ taskId: 1, type: "completed", note: "second" });
+  inbox.enqueue({ taskId: 1, type: "handoff", note: "second" });
   assert.deepEqual(
     inbox.forTask(1).map((m) => m.note),
     ["first", "second"],

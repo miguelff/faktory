@@ -35,24 +35,24 @@ test("upsert discovers once (into backlog), refreshes afterwards", () => {
 test("transition enforces the lifecycle and records events", () => {
   const store = makeStore();
   const t = store.upsertFromItem("s1", item);
-  store.transition(t.id, "to_shape", "test");
-  assert.throws(() => store.transition(t.id, "ready", "test"), /illegal transition/);
-  store.transition(t.id, "to_execute", "test", { patch: { branch: "faktory-x/1-fix" } });
+  store.transition(t.id, "shape", "test");
+  assert.throws(() => store.transition(t.id, "release", "test"), /illegal transition/);
+  store.transition(t.id, "execute", "test", { patch: { branch: "faktory-x/1-fix" } });
   const now = store.byId(t.id)!;
-  assert.equal(now.phase, "to_execute");
+  assert.equal(now.phase, "execute");
   assert.equal(now.branch, "faktory-x/1-fix");
   assert.deepEqual(
     store.events(t.id).map((e) => e.to),
-    ["backlog", "to_shape", "to_execute"],
+    ["backlog", "shape", "execute"],
   );
 });
 
 test("patch can clear a field (agent detaches when a stage finishes)", () => {
   const store = makeStore();
   const t = store.upsertFromItem("s1", item);
-  store.transition(t.id, "to_shape", "test", { patch: { agentName: "a-1", stage: "to_shape" } });
+  store.transition(t.id, "shape", "test", { patch: { agentName: "a-1", stage: "shape" } });
   assert.equal(store.byId(t.id)!.agentName, "a-1");
-  store.transition(t.id, "to_execute", "test", { patch: { agentName: null, stage: null } });
+  store.transition(t.id, "execute", "test", { patch: { agentName: null, stage: null } });
   const now = store.byId(t.id)!;
   assert.equal(now.agentName, null);
   assert.equal(now.stage, null);
@@ -61,15 +61,15 @@ test("patch can clear a field (agent detaches when a stage finishes)", () => {
 test("update patches herdr coordinates without a phase change or event", () => {
   const store = makeStore();
   const t = store.upsertFromItem("s1", item);
-  store.transition(t.id, "to_shape", "test");
-  store.update(t.id, { workspaceId: "ws1", paneId: "p1", agentName: "a1", stage: "to_shape" });
+  store.transition(t.id, "shape", "test");
+  store.update(t.id, { workspaceId: "ws1", paneId: "p1", agentName: "a1", stage: "shape" });
   const now = store.byId(t.id)!;
-  assert.equal(now.phase, "to_shape");
+  assert.equal(now.phase, "shape");
   assert.equal(now.workspaceId, "ws1");
   assert.equal(now.agentName, "a1");
   assert.deepEqual(
     store.events(t.id).map((e) => e.to),
-    ["backlog", "to_shape"],
+    ["backlog", "shape"],
     "update() records no audit event",
   );
 });
@@ -77,12 +77,12 @@ test("update patches herdr coordinates without a phase change or event", () => {
 test("stage tabs are recorded per task/stage", () => {
   const store = makeStore();
   const t = store.upsertFromItem("s1", item);
-  store.recordStage(t.id, "to_shape", { paneId: "p1", agentName: "a1" });
-  store.recordStage(t.id, "to_execute", { paneId: "p2", agentName: "a2" });
-  store.recordStage(t.id, "to_shape", { paneId: "p1b" }); // upsert keeps agent, updates pane
+  store.recordStage(t.id, "shape", { paneId: "p1", agentName: "a1" });
+  store.recordStage(t.id, "execute", { paneId: "p2", agentName: "a2" });
+  store.recordStage(t.id, "shape", { paneId: "p1b" }); // upsert keeps agent, updates pane
   const stages = store.stagesFor(t.id);
   assert.equal(stages.length, 2);
-  const shape = stages.find((s) => s.stage === "to_shape")!;
+  const shape = stages.find((s) => s.stage === "shape")!;
   assert.equal(shape.paneId, "p1b");
   assert.equal(shape.agentName, "a1");
   // byAgent resolves the task from its *current* stage agent (inbox origin check).

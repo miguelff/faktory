@@ -27,6 +27,9 @@ class FakeSource implements WorkSource {
   async getItem(id: string) {
     return this.items.find((i) => i.id === id) ?? null;
   }
+  async unclaim(id: string) {
+    delete this.owners[id];
+  }
   async claim(id: string) {
     if (this.owners[id]) return this.owners[id]!;
     this.owners[id] = this.nextClaimWinner ?? "faktory-test";
@@ -72,9 +75,9 @@ test("health reports prefix, the new phases, and the stages", async () => {
   const { status, body } = await api("/api/health");
   assert.equal(status, 200);
   assert.equal(body.prefix, "faktory-test");
-  assert.ok(body.phases.includes("to_shape"));
+  assert.ok(body.phases.includes("shape"));
   assert.ok(!body.phases.includes("running"));
-  assert.deepEqual(body.stages, ["to_shape", "to_execute", "to_review"]);
+  assert.deepEqual(body.stages, ["shape", "execute", "review", "release"]);
 });
 
 test("sync discovers candidates into backlog", async () => {
@@ -90,17 +93,17 @@ test("sync discovers candidates into backlog", async () => {
 test("transition validates lifecycle, claims on leaving backlog, mirrors status", async () => {
   const bad = await api("/api/tasks/1/transition", {
     method: "POST",
-    body: JSON.stringify({ to: "to_execute", actor: "test" }),
+    body: JSON.stringify({ to: "execute", actor: "test" }),
   });
-  assert.equal(bad.status, 409, "backlog → to_execute is illegal");
+  assert.equal(bad.status, 409, "backlog → execute is illegal");
 
   const shaped = await api("/api/tasks/1/transition", {
     method: "POST",
-    body: JSON.stringify({ to: "to_shape", actor: "test" }),
+    body: JSON.stringify({ to: "shape", actor: "test" }),
   });
-  assert.equal(shaped.body.task.phase, "to_shape");
+  assert.equal(shaped.body.task.phase, "shape");
   assert.equal(source.owners.n1, "faktory-test", "claimed when leaving backlog");
-  assert.equal(source.statuses.n1, "to_shape", "faktory_status mirrors the phase");
+  assert.equal(source.statuses.n1, "shape", "faktory_status mirrors the phase");
 });
 
 test("a lost claim archives the local task and returns 409", async () => {
@@ -111,7 +114,7 @@ test("a lost claim archives the local task and returns 409", async () => {
   source.nextClaimWinner = "faktory-rival";
   const res = await api(`/api/tasks/${t.id}/transition`, {
     method: "POST",
-    body: JSON.stringify({ to: "to_shape", actor: "test" }),
+    body: JSON.stringify({ to: "shape", actor: "test" }),
   });
   assert.equal(res.status, 409);
   const { body: after } = await api(`/api/tasks/${t.id}`);
@@ -149,7 +152,7 @@ test("task detail includes the audit trail and inbox", async () => {
   assert.equal(body.task.id, 1);
   assert.deepEqual(
     body.events.map((e: any) => e.to),
-    ["backlog", "to_shape"],
+    ["backlog", "shape"],
   );
   assert.ok(Array.isArray(body.inbox));
 });
@@ -160,10 +163,10 @@ test("inbox endpoint validates the type and enqueues typed messages", async () =
 
   const ok = await api("/api/tasks/1/inbox", {
     method: "POST",
-    body: JSON.stringify({ type: "completed", sender: "a1", stage: "to_shape", note: "shaped", data: { pr: 1 } }),
+    body: JSON.stringify({ type: "handoff", sender: "a1", stage: "shape", note: "shaped", data: { pr: 1, to: "execute" } }),
   });
   assert.equal(ok.status, 202);
-  assert.equal(ok.body.message.type, "completed");
+  assert.equal(ok.body.message.type, "handoff");
 
   const { body } = await api("/api/tasks/1");
   assert.equal(body.inbox.at(-1).note, "shaped");
@@ -175,14 +178,14 @@ test("inbox on a missing task returns 404", async () => {
   assert.equal(res.status, 404);
 });
 
-test("comment posts a handoff marker through the source, defaulting status from phase", async () => {
+test("comment posts a handoff marker through the source, defaulting from to the phase", async () => {
   source.comments.length = 0;
   const res = await api("/api/tasks/1/comment", {
     method: "POST",
     body: JSON.stringify({ note: "Plan approved, executing.", data: { iteration: 2 } }),
   });
   assert.equal(res.status, 200);
-  assert.equal(res.body.body, '<faktory status="to_shape" iteration="2">Plan approved, executing.</faktory>');
+  assert.equal(res.body.body, '<handoff from="shape" iteration="2">Plan approved, executing.</handoff>');
   assert.equal(source.comments.at(-1)!.id, "n1");
 });
 

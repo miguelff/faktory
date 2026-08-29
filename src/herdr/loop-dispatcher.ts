@@ -1,5 +1,5 @@
 import type { AgentStatus, Dispatcher, StageDispatchResult } from "../core/loop.ts";
-import type { Stage, Task } from "../core/types.ts";
+import type { Role, Task } from "../core/types.ts";
 import type { HerdrClient } from "./client.ts";
 import { archiveTaskSpace, dispatchStage, stageAgentName, type DispatchOptions } from "./dispatch.ts";
 
@@ -17,12 +17,12 @@ export class HerdrDispatcher implements Dispatcher {
     private readonly opts: DispatchOptions,
   ) {}
 
-  agentNameFor(taskId: number, stage: Stage): string {
-    return stageAgentName(this.prefix, taskId, stage);
+  agentNameFor(taskId: number, role: Role): string {
+    return stageAgentName(this.prefix, taskId, role);
   }
 
-  dispatchStage(task: Task, stage: Stage, prompt: string): Promise<StageDispatchResult> {
-    return dispatchStage(this.herdr, task, stage, prompt, this.prefix, this.opts);
+  dispatchStage(task: Task, role: Role, prompt: string): Promise<StageDispatchResult> {
+    return dispatchStage(this.herdr, task, role, prompt, this.prefix, this.opts);
   }
 
   archiveTaskSpace(task: Task): Promise<void> {
@@ -40,5 +40,9 @@ export class HerdrDispatcher implements Dispatcher {
 
   async nudge(agentName: string, text: string): Promise<void> {
     await this.herdr.request("agent.prompt", { target: agentName, text });
+  }
+
+  async notify(title: string, body: string): Promise<void> {
+    await this.herdr.request("notification.show", { title, body, sound: "request" });
   }
 }

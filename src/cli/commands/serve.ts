@@ -7,7 +7,7 @@ import { bootstrapDetached, bootstrapWorkbench } from "../../herdr/bootstrap.ts"
 import { sessionSocketPath, waitForSession } from "../../herdr/session.ts";
 import { Loop } from "../../core/loop.ts";
 import type { Engine } from "../../core/engine.ts";
-import type { Stage, Task } from "../../core/types.ts";
+import type { Role, Task } from "../../core/types.ts";
 import { runSetup } from "../../setup.ts";
 import { ensureDependencies, harnessDependency, herdrDependency } from "../../deps.ts";
 import {
@@ -23,7 +23,6 @@ import {
 } from "../context.ts";
 import { selectedConfig, withConfigOption } from "../options.ts";
 
-const DEFAULT_WIP = 3;
 const DEFAULT_STALL_MS = 5 * 60_000;
 const DEFAULT_TICK_MS = 5_000;
 
@@ -45,7 +44,6 @@ export function registerServe(program: Command): void {
       .option("--agent-kind <kind>", "agent harness stage agents run as")
       .option("--repo-cwd <path>", "repository Faktory dispatches work in")
       .option("--session <name>", "herdr session name")
-      .option("--wip <n>", "how many tasks may occupy the actionable lanes")
       .option("--headless", "no herdr session or board — just the API + loop")
       .option("--no-board", "skip the kanban board pane")
       .action((configArg, opts) => runServe(configArg, opts)),
@@ -73,18 +71,16 @@ interface ServeOpts {
   agentKind?: string;
   repoCwd?: string;
   session?: string;
-  wip?: string;
   headless?: boolean;
   board: boolean; // commander sets `board: false` for --no-board
 }
 
-/** Build the loop config that binds agents' `faktory report` command + WIP. */
-function loopConfig(engine: Engine, slug: string, port: number, wip: number) {
+/** Build the loop config that binds agents' `faktory report` command. */
+function loopConfig(engine: Engine, slug: string, port: number) {
   return {
-    wip,
     stallTimeoutMs: DEFAULT_STALL_MS,
-    reportCommandFor: (task: Task, stage: Stage, agentName: string) =>
-      `${FAKTORY_BIN} report ${task.id} --config ${slug} --port ${port} --sender ${agentName} --stage ${stage}`,
+    reportCommandFor: (task: Task, role: Role, agentName: string) =>
+      `${FAKTORY_BIN} report ${task.id} --config ${slug} --port ${port} --sender ${agentName} --stage ${role}`,
   };
 }
 
@@ -99,12 +95,6 @@ async function runServe(configArg: string | undefined, opts: ServeOpts): Promise
   }
   const agentKind = opts.agentKind ?? getConfig(ctx.db, "agentKind") ?? "pi";
   const port = Number(opts.port ?? getConfig(ctx.db, "port") ?? 4600);
-  // Guard against a non-numeric --wip / stored config: a NaN WIP would make the
-  // loop's `count >= wip` cap always false and flood the lanes with the whole
-  // backlog. Fall back to the default on anything that isn't a valid count.
-  const wipRaw = Number(opts.wip ?? getConfig(ctx.db, "wip") ?? DEFAULT_WIP);
-  const wip = Number.isInteger(wipRaw) && wipRaw >= 0 ? wipRaw : DEFAULT_WIP;
-
   if (!opts.headless) {
     await ensureDependencies([herdrDependency(), harnessDependency(agentKind)]);
   }
@@ -136,7 +126,7 @@ async function runServe(configArg: string | undefined, opts: ServeOpts): Promise
     if (herdr) {
       const repoCwd = opts.repoCwd ?? getConfig(ctx.db, "repoCwd") ?? REPO_ROOT;
       const dispatcher = new HerdrDispatcher(herdr, ctx.ref.prefix, { agentKind, repoCwd });
-      const loop = new Loop(engine, dispatcher, loopConfig(engine, slug, port, wip));
+      const loop = new Loop(engine, dispatcher, loopConfig(engine, slug, port));
       const tick = async () => {
         try {
           await loop.tick();
@@ -146,7 +136,7 @@ async function runServe(configArg: string | undefined, opts: ServeOpts): Promise
       };
       await tick();
       setInterval(tick, DEFAULT_TICK_MS).unref();
-      console.log(`engine loop running (wip ${wip})`);
+      console.log("engine loop running");
     }
 
     const fromPaneId = process.env.HERDR_PANE_ID;
