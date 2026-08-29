@@ -177,7 +177,7 @@ function sessionNameFor(slug: string): string {
   return `faktory-${slug}`;
 }
 
-/** Detached workbench: serve, tui, and the agent loop each in their own pane. */
+/** Detached workbench: serve, tui, and the agent loop each in their own named tab. */
 function detachedWorkbench(slug: string, port: number, orchestratorKind: string) {
   return {
     instance: slug,
@@ -193,8 +193,8 @@ function detachedWorkbench(slug: string, port: number, orchestratorKind: string)
 }
 
 /**
- * Launcher mode: make sure the workbench runs INSIDE the session (serve pane,
- * TUI pane, agent-loop pane), then attach the current terminal to it. When the
+ * Launcher mode: make sure the workbench runs INSIDE the session (serve tab,
+ * TUI tab, agent-loop tab), then attach the current terminal to it. When the
  * session server isn't up yet, attaching starts it and a detached provisioner
  * sets the panes up as soon as the socket answers.
  */
@@ -203,7 +203,7 @@ async function launchAndAttach(slug: string, sessionName: string, port: number, 
   if (client) {
     process.env.HERDR_SOCKET_PATH = sessionSocketPath(sessionName);
     const result = await bootstrapDetached(client, detachedWorkbench(slug, port, orchestratorKind));
-    if (result.servePaneId) console.log(`serve pane ${result.servePaneId}`);
+    if (result.servePaneId) console.log(`serve tab (pane ${result.servePaneId})`);
     if (result.agentName && !result.agentAlreadyRunning) console.log(`orchestrator ${result.agentName} starting`);
   } else {
     spawn(FAKTORY_BIN, ["__provision", slug, "--session", sessionName, "--port", String(port)], {
@@ -460,17 +460,18 @@ async function main() {
             faktoryBin: FAKTORY_BIN,
             agentKind: orchestratorKind,
             fromPaneId,
+            serveTab: true,
             tui: !flags["no-tui"],
             agent: !flags["no-agent"],
           });
           if (result.alreadyBootstrapped)
-            console.log(`workspace ${result.workspaceId} already bootstrapped — panes preserved`);
-          if (result.tuiPaneId) console.log(`tui pane ${result.tuiPaneId}`);
+            console.log(`workspace ${result.workspaceId} already bootstrapped — tabs preserved`);
+          if (result.tuiPaneId) console.log(`tui tab (pane ${result.tuiPaneId})`);
           if (result.agentName)
             console.log(
               result.agentAlreadyRunning
                 ? `orchestrator ${result.agentName} already running`
-                : `orchestrator ${result.agentName} (${orchestratorKind}) started in pane ${result.agentPaneId}`,
+                : `orchestrator ${result.agentName} (${orchestratorKind}) started in its own tab (pane ${result.agentPaneId})`,
             );
         } catch (e) {
           console.warn(`warning: workbench bootstrap failed: ${(e as Error).message}`);
@@ -521,7 +522,7 @@ async function main() {
       console.log(
         result.agentAlreadyRunning
           ? `orchestrator ${result.agentName} already running`
-          : `orchestrator ${result.agentName} (${orchestratorKind}) started in pane ${result.agentPaneId} against http://127.0.0.1:${port}`,
+          : `orchestrator ${result.agentName} (${orchestratorKind}) started in its own tab (pane ${result.agentPaneId}) against http://127.0.0.1:${port}`,
       );
       break;
     }
