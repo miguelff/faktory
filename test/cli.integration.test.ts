@@ -30,7 +30,7 @@ async function faktory(args: string[]): Promise<{ code: number; stdout: string; 
 
 // The registry is the spec: every user-facing top-level command must be
 // discoverable from bare `faktory`. Update this list when you add one.
-const TOP_LEVEL = ["serve", "setup", "config", "source", "task", "tui", "report", "invite", "join"];
+const TOP_LEVEL = ["serve", "config", "source", "task", "tui", "report", "invite", "join"];
 
 test("no arguments prints subcommands and options on stdout, exit 0", async () => {
   const res = await faktory([]);
@@ -55,6 +55,8 @@ test("help hides internal and deprecated commands", async () => {
   assert.doesNotMatch(res.stdout, /^\s*sync\b/m);
   assert.doesNotMatch(res.stdout, /^\s*tasks\b/m);
   assert.doesNotMatch(res.stdout, /^\s*transition\b/m);
+  // `setup` is a deprecated alias of `config new` now, hidden from top-level help.
+  assert.doesNotMatch(res.stdout, /^\s*setup\b/m);
 });
 
 test("unknown command fails with a helpful error", async () => {
