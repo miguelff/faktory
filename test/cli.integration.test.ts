@@ -30,7 +30,7 @@ async function faktory(args: string[]): Promise<{ code: number; stdout: string; 
 
 // The registry is the spec: every user-facing top-level command must be
 // discoverable from bare `faktory`. Update this list when you add one.
-const TOP_LEVEL = ["serve", "setup", "config", "source", "sync", "tasks", "transition", "tui", "orchestrate", "invite", "join"];
+const TOP_LEVEL = ["serve", "setup", "config", "source", "task", "tui", "orchestrate", "invite", "join"];
 
 test("no arguments prints subcommands and options on stdout, exit 0", async () => {
   const res = await faktory([]);
@@ -51,6 +51,9 @@ test("help hides internal and deprecated commands", async () => {
   const res = await faktory(["--help"]);
   assert.doesNotMatch(res.stdout, /__provision/);
   assert.doesNotMatch(res.stdout, /\binstances\b/);
+  // The flat pre-`task` verbs are deprecated aliases now, hidden from top-level help.
+  assert.doesNotMatch(res.stdout, /^\s*sync\b/m);
+  assert.doesNotMatch(res.stdout, /^\s*tasks\b/m);
 });
 
 test("unknown command fails with a helpful error", async () => {
@@ -60,11 +63,26 @@ test("unknown command fails with a helpful error", async () => {
 });
 
 test("per-command help documents options non-interactively", async () => {
-  const res = await faktory(["transition", "--help"]);
+  const res = await faktory(["task", "transition", "--help"]);
   assert.equal(res.code, 0);
   assert.match(res.stdout, /<id> <phase>/);
   assert.match(res.stdout, /--force/);
   assert.match(res.stdout, /-c, --config/);
+});
+
+test("task groups sync, list, and transition under one verb space", async () => {
+  const res = await faktory(["task", "--help"]);
+  assert.equal(res.code, 0);
+  for (const verb of ["sync", "list", "transition"]) assert.match(res.stdout, new RegExp(`\\b${verb}\\b`));
+});
+
+test("deprecated flat task verbs still work (hidden)", async () => {
+  // Resolve far enough to hit the config guard, proving the alias is wired.
+  for (const args of [["sync"], ["tasks"], ["transition", "1", "queued"]]) {
+    const res = await faktory([...args, "--config", "ghost"]);
+    assert.equal(res.code, 1, `${args[0]} alias should run`);
+    assert.match(res.stderr, /config "ghost" does not exist/);
+  }
 });
 
 test("config groups CRUD and settings under one verb space", async () => {
