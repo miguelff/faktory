@@ -94,7 +94,7 @@ internal (`__provision`) and deprecated (`instances`, `--instance`) surface with
 Two vendored skills live in `.agents/skills/`; load them **before** touching any
 interface, and re-run them as a review step after:
 
-- **`web-design-guidelines`** (vercel-labs) — for anything under `src/web`.
+- **`web-design-guidelines`** (vercel-labs) — for any web UI, should one return.
   Follow its instructions: fetch the latest rules from its source URL and audit
   changed files (accessibility, focus states, forms, typography, empty states,
   URL-synced state, reduced motion). Fix every finding or justify it.
@@ -117,14 +117,20 @@ npx skills check   # update check
 
 | path                | responsibility                                        |
 |---------------------|-------------------------------------------------------|
-| `src/core`          | domain: types, instance, SQLite, lifecycle, tasks     |
+| `src/core`          | domain: types, lifecycle, tasks, inbox, feed, stages, engine, **loop** |
 | `src/sources`       | WorkSource port + abstract factory + Notion adapter   |
-| `src/herdr`         | herdr socket client (NDJSON), dispatcher, reconciler  |
-| `src/api`           | HTTP control plane + static web UI                    |
+| `src/herdr`         | herdr socket client, per-task/per-stage dispatch, loop dispatcher, bootstrap |
+| `src/api`           | thin HTTP control plane (board/feed + inbox endpoint)  |
 | `src/cli`           | Commander command registry (one file per command)     |
-| `src/tui`           | terminal inspector/repair                             |
-| `skills/`           | skills teaching orchestrator agents to drive Faktory  |
+| `src/tui`           | terminal kanban board + action feed + manual repair    |
 | `test/`             | unit + integration tests (node:test)                  |
+
+The engine **loop** (`src/core/loop.ts`) is the deterministic coordinator that
+replaced the old prompt-driven orchestrator agent: it owns every transition,
+lock, dispatch, and source annotation. Agents talk back only through the inbox
+(`faktory report` → `POST /api/tasks/:id/inbox`); the loop reaches herdr through
+the `Dispatcher` port so the domain stays pure. There is no web UI (Notion is
+the remote board) and no orchestrator agent/skill.
 
 ---
 
