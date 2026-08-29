@@ -1,0 +1,24 @@
+{
+  "name": "faktory",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Local orchestration system that drives coding agents in herdr from an issue backlog (Notion).",
+  "engines": {
+    "node": ">=24"
+  },
+  "bin": {
+    "faktory": "./bin/faktory"
+  },
+  "scripts": {
+    "dev": "NODE_OPTIONS=--no-warnings tsx src/cli.ts",
+    "introspect:notion": "NODE_OPTIONS=--no-warnings tsx scripts/introspect-notion.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "NODE_OPTIONS=--no-warnings tsx --test test/*.test.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}

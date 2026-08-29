@@ -1,0 +1,12 @@
+node_modules/
+dist/
+*.log
+.DS_Store
+
+# Local Faktory state (never commit secrets or the state DB)
+.faktory/
+*.sqlite
+*.sqlite-*
+.env
+.env.local
+secrets.json

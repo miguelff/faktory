@@ -1,0 +1,5 @@
+#!/usr/bin/env sh
+# Faktory launcher — runs the TypeScript CLI via tsx.
+DIR="$(cd "$(dirname "$0")/.." && pwd)"
+export NODE_OPTIONS="--no-warnings ${NODE_OPTIONS:-}"
+exec "$DIR/node_modules/.bin/tsx" "$DIR/src/cli.ts" "$@"
