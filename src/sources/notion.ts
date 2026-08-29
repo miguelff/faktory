@@ -16,6 +16,8 @@ export interface NotionSourceConfig {
   candidateValue: string;
   /** Status property written back per phase, e.g. "Status". */
   statusProperty?: string;
+  /** Notion type of that property. API-created databases can only have "select". Default "status". */
+  statusType?: "status" | "select";
   /** Multi-select property used for lifecycle mirror tags (often same as candidateProperty). */
   tagsProperty?: string;
   /** Optional numeric priority property, e.g. "Priority". */
@@ -68,9 +70,10 @@ export function buildCandidateFilter(cfg: NotionSourceConfig): Record<string, un
     // common case (Tags). Select/status/checkbox variants are chosen by shape.
     { property: cfg.candidateProperty, multi_select: { contains: cfg.candidateValue } },
   ];
+  const statusKind = cfg.statusType ?? "status";
   for (const status of cfg.excludeStatuses ?? []) {
     if (cfg.statusProperty) {
-      and.push({ property: cfg.statusProperty, status: { does_not_equal: status } });
+      and.push({ property: cfg.statusProperty, [statusKind]: { does_not_equal: status } });
     }
   }
   return { and };
@@ -133,10 +136,11 @@ class NotionSource implements WorkSource {
 
   async setStatus(itemId: string, status: string): Promise<void> {
     if (!this.cfg.statusProperty) return;
+    const kind = this.cfg.statusType ?? "status";
     await this.call(`/pages/${itemId}`, {
       method: "PATCH",
       body: JSON.stringify({
-        properties: { [this.cfg.statusProperty]: { status: { name: status } } },
+        properties: { [this.cfg.statusProperty]: { [kind]: { name: status } } },
       }),
     });
   }

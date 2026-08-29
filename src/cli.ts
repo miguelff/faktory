@@ -9,6 +9,7 @@ import type { Phase } from "./core/types.ts";
 import { Tui } from "./tui/tui.ts";
 import { tagForRole } from "./core/lifecycle.ts";
 import { TAG_ROLES } from "./core/types.ts";
+import { runSetup } from "./setup.ts";
 
 /**
  * faktory <command> [--instance NAME] [...]
@@ -24,7 +25,9 @@ import { TAG_ROLES } from "./core/types.ts";
  *   config:set <k> <v>     persist instance config (repoCwd, agentKind, port, statusByPhase)
  *   config:get [k]         show instance config
  */
-const HELP = `usage: faktory <init|instances|source:set-notion|sync|tasks|transition|serve|tui|config:set|config:get> [options]`;
+const HELP = `usage: faktory <setup|init|instances|source:set-notion|sync|tasks|transition|serve|tui|config:set|config:get> [options]
+
+  new here? run: faktory setup   (interactive wizard)`;
 
 function requireInstance(name: string | undefined) {
   const instances = listInstances();
@@ -60,6 +63,7 @@ async function main() {
       "candidate-property": { type: "string" },
       "candidate-value": { type: "string" },
       "status-property": { type: "string" },
+      "status-type": { type: "string" },
       "tags-property": { type: "string" },
       "priority-property": { type: "string" },
       token: { type: "string" },
@@ -72,6 +76,10 @@ async function main() {
   });
 
   switch (cmd) {
+    case "setup": {
+      await runSetup();
+      break;
+    }
     case "init": {
       const name = positionals[0];
       if (!name) throw new Error("usage: faktory init <name>");
@@ -97,6 +105,7 @@ async function main() {
         candidateProperty,
         candidateValue,
         statusProperty: flags["status-property"],
+        statusType: flags["status-type"],
         tagsProperty: flags["tags-property"] ?? candidateProperty,
         priorityProperty: flags["priority-property"],
       };

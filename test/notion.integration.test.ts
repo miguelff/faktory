@@ -184,3 +184,15 @@ test("buildCandidateFilter skips status exclusions without a status property", (
   const f = buildCandidateFilter({ ...cfg, statusProperty: undefined }) as any;
   assert.equal(f.and.length, 1);
 });
+
+test("statusType select switches filter and write shapes", async () => {
+  const f = buildCandidateFilter({ ...cfg, statusType: "select" }) as any;
+  assert.deepEqual(f.and[1], { property: "Status", select: { does_not_equal: "Done" } });
+  const source = createSource(
+    { id: "sel", kind: "notion", config: { ...cfg, statusType: "select" } as unknown as Record<string, unknown> },
+    { getSecret: () => "tkn", prefix: "faktory-test", baseUrl },
+  );
+  state.patches.length = 0;
+  await source.setStatus("p1", "Review");
+  assert.deepEqual(state.patches[0]!.body.properties.Status, { select: { name: "Review" } });
+});
