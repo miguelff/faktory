@@ -7,6 +7,8 @@ import { createApiServer } from "./api/server.ts";
 import { HerdrClient } from "./herdr/client.ts";
 import type { Phase } from "./core/types.ts";
 import { Tui } from "./tui/tui.ts";
+import { tagForRole } from "./core/lifecycle.ts";
+import { TAG_ROLES } from "./core/types.ts";
 
 /**
  * faktory <command> [--instance NAME] [...]
@@ -100,6 +102,16 @@ async function main() {
         "INSERT INTO sources (id, kind, config) VALUES ('primary', 'notion', ?) ON CONFLICT(id) DO UPDATE SET kind='notion', config=excluded.config",
       ).run(JSON.stringify(config));
       console.log(`notion source configured: db ${databaseId}, candidacy ${candidateProperty} contains ${candidateValue}`);
+      // Provision convention tags so Notion accepts filters on them.
+      const source = createSource(
+        { id: "primary", kind: "notion", config: config as unknown as Record<string, unknown> },
+        { getSecret: (k) => getSecret(db, k), prefix: ref.prefix },
+      );
+      if (source.ensureTags) {
+        const wanted = [candidateValue, ...TAG_ROLES.map((r) => tagForRole(ref.prefix, r))];
+        const created = await source.ensureTags([...new Set(wanted)]);
+        if (created.length) console.log(`created tag option(s): ${created.join(", ")}`);
+      }
       break;
     }
     case "sync": {

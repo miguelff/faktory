@@ -149,6 +149,25 @@ class NotionSource implements WorkSource {
     await this.mutateTags(itemId, (tags) => tags.filter((t) => t !== tag));
   }
 
+  /** Add missing convention tags as options on the tags property (schema update). */
+  async ensureTags(tags: string[]): Promise<string[]> {
+    const prop = this.cfg.tagsProperty ?? this.cfg.candidateProperty;
+    const db = await this.call(`/databases/${this.cfg.databaseId}`);
+    const options: Array<{ name: string }> = db.properties?.[prop]?.multi_select?.options ?? [];
+    const existing = new Set(options.map((o) => o.name));
+    const missing = tags.filter((t) => !existing.has(t));
+    if (missing.length === 0) return [];
+    await this.call(`/databases/${this.cfg.databaseId}`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        properties: {
+          [prop]: { multi_select: { options: [...options, ...missing.map((name) => ({ name }))] } },
+        },
+      }),
+    });
+    return missing;
+  }
+
   /** Notion multi_select PATCH replaces the whole array: read-modify-write. */
   private async mutateTags(itemId: string, fn: (tags: string[]) => string[]): Promise<void> {
     const prop = this.cfg.tagsProperty ?? this.cfg.candidateProperty;

@@ -24,6 +24,13 @@ export interface WorkSource {
   /** Tag management (optional capability — not all sources have labels). */
   addTag?(itemId: string, tag: string): Promise<void>;
   removeTag?(itemId: string, tag: string): Promise<void>;
+
+  /**
+   * Provision the instance's convention tags in the source so they can be
+   * filtered on (Notion rejects queries on unknown multi_select options).
+   * Returns the tags that were newly created.
+   */
+  ensureTags?(tags: string[]): Promise<string[]>;
 }
 
 /** Persisted (non-secret) source configuration. */

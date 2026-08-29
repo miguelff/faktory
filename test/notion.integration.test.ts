@@ -42,6 +42,7 @@ const state = {
   ]),
   lastQueryFilter: null as unknown,
   patches: [] as Array<{ id: string; body: any }>,
+  dbOptions: [{ name: "misc" }, { name: "faktory-test-execute" }] as Array<{ name: string }>,
 };
 
 before(async () => {
@@ -56,6 +57,17 @@ before(async () => {
     const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString()) : {};
     const url = req.url!;
 
+    if (url === "/databases/db-1" && req.method === "GET") {
+      res.end(
+        JSON.stringify({ properties: { Tags: { type: "multi_select", multi_select: { options: state.dbOptions } } } }),
+      );
+      return;
+    }
+    if (url === "/databases/db-1" && req.method === "PATCH") {
+      state.dbOptions = body.properties.Tags.multi_select.options;
+      res.end("{}");
+      return;
+    }
     if (req.method === "POST" && url === "/databases/db-1/query") {
       state.lastQueryFilter = body.filter;
       const all = [...state.pages.values()];
@@ -154,6 +166,18 @@ test("pageToWorkItem tolerates missing properties", () => {
   assert.equal(item.title, "(untitled)");
   assert.equal(item.status, null);
   assert.deepEqual(item.tags, []);
+});
+
+test("ensureTags provisions only the missing multi_select options", async () => {
+  const source = makeSource();
+  const created = await source.ensureTags!(["faktory-test-execute", "faktory-test-processing", "faktory-test-stalled"]);
+  assert.deepEqual(created, ["faktory-test-processing", "faktory-test-stalled"]);
+  assert.deepEqual(
+    state.dbOptions.map((o) => o.name),
+    ["misc", "faktory-test-execute", "faktory-test-processing", "faktory-test-stalled"],
+  );
+  const again = await source.ensureTags!(["faktory-test-processing"]);
+  assert.deepEqual(again, [], "idempotent");
 });
 
 test("buildCandidateFilter skips status exclusions without a status property", () => {
