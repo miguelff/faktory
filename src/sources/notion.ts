@@ -1,7 +1,7 @@
 import { setTimeout as sleep } from "node:timers/promises";
 import type { WorkItem } from "../core/types.ts";
 import { FAKTORY_STATUSES } from "../core/lifecycle.ts";
-import type { SourceConfigRecord, SourceContext, WorkSource } from "./types.ts";
+import type { NewWorkItem, SourceConfigRecord, SourceContext, WorkSource } from "./types.ts";
 
 /** Terminal faktory_status that must never resurface as a candidate. */
 const DONE = "done";
@@ -156,6 +156,36 @@ class NotionSource implements WorkSource {
       if (String(e).includes("Notion 404")) return null;
       throw e;
     }
+  }
+
+  /**
+   * Create a page in the backlog database, owned by this instance from birth.
+   * The title lands on whichever property is the database's `title`, so it
+   * works regardless of what that property is named (Name, Task, …).
+   */
+  async createItem(input: NewWorkItem): Promise<WorkItem> {
+    const titleProp = await this.titlePropertyName();
+    const properties: Record<string, unknown> = {
+      [titleProp]: { title: [{ type: "text", text: { content: input.title } }] },
+      [this.names.status]: { select: { name: input.status } },
+      [this.names.ownedBy]: { rich_text: [{ type: "text", text: { content: this.prefix } }] },
+      [this.names.ownedAt]: { date: { start: new Date().toISOString() } },
+    };
+    if (this.cfg.priorityProperty && input.priority != null) {
+      properties[this.cfg.priorityProperty] = { number: input.priority };
+    }
+    const page = await this.call(`/pages`, {
+      method: "POST",
+      body: JSON.stringify({ parent: { database_id: this.cfg.databaseId }, properties }),
+    });
+    return pageToWorkItem(page, this.cfg);
+  }
+
+  /** Find the database's title property name (Notion allows renaming it). */
+  private async titlePropertyName(): Promise<string> {
+    const db = await this.call(`/databases/${this.cfg.databaseId}`);
+    const entry = Object.entries(db.properties ?? {}).find(([, p]: [string, any]) => p?.type === "title");
+    return entry?.[0] ?? "Name";
   }
 
   /**

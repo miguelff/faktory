@@ -48,6 +48,20 @@ export class TaskStore {
     return task;
   }
 
+  /**
+   * Insert a task the instance created (and therefore already owns) directly at
+   * `phase`, bypassing the discovered→claim path. Logs a `null → phase` audit
+   * event so the trail shows the task was created rather than discovered.
+   */
+  createOwned(sourceId: string, item: WorkItem, phase: Phase, actor: string, note?: string): Task {
+    const res = this.db
+      .prepare("INSERT INTO tasks (source_id, item_id, title, url, phase, priority) VALUES (?, ?, ?, ?, ?, ?)")
+      .run(sourceId, item.id, item.title, item.url, phase, item.priority);
+    const task = this.byId(Number(res.lastInsertRowid))!;
+    this.logEvent(task.id, null, phase, actor, note ?? "created");
+    return task;
+  }
+
   byId(id: number): Task | null {
     const r = this.db.prepare("SELECT * FROM tasks WHERE id = ?").get(id) as
       | Record<string, unknown>

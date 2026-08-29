@@ -7,6 +7,7 @@ Localhost JSON control plane, served by `faktory serve` (default
 |--------|-----------------------------|-------------------------------------------------|--------|
 | GET    | `/api/health`               | —                                               | `{ ok, prefix, phases }` |
 | GET    | `/api/tasks`                | — (`?phase=` filter)                            | `{ tasks: Task[] }` |
+| POST   | `/api/tasks`                | `{ title, phase?, priority?, note? }`           | creates a new work item in the source (owned by this config from birth) at `phase` (default `queued`, so it is immediately dispatchable) and mirrors `faktory_status`. Returns `201 { task }`. `400` on empty title or invalid phase. |
 | GET    | `/api/tasks/:id`            | —                                               | `{ task, events }` (audit trail) |
 | POST   | `/api/sync`                 | —                                               | pulls source candidates; `{ discovered: Task[] }` |
 | POST   | `/api/tasks/:id/transition` | `{ to, actor?, note? }`                         | validated lifecycle move, mirrored to the source (tags + status). `409` on illegal moves. |

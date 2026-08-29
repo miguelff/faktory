@@ -42,6 +42,24 @@ export function createApiServer(deps: ApiDeps): Server {
     json(res, 200, { tasks: deps.engine.tasks.list(phase ?? undefined) });
   });
 
+  route("POST", "/api/tasks", async (req, res) => {
+    const body = await readJson(req);
+    if (!body.title || !String(body.title).trim()) return json(res, 400, { error: "title is required" });
+    const phase = (body.phase ?? "queued") as Phase;
+    if (!PHASES.includes(phase)) return json(res, 400, { error: `invalid phase ${JSON.stringify(body.phase)}` });
+    try {
+      const task = await deps.engine.createTask({
+        title: String(body.title),
+        phase,
+        priority: body.priority ?? null,
+        note: body.note,
+      });
+      json(res, 201, { task });
+    } catch (e) {
+      json(res, 500, { error: String((e as Error).message) });
+    }
+  });
+
   route("GET", "/api/tasks/:id", async (_req, res, p) => {
     const task = deps.engine.tasks.byId(Number(p.id));
     if (!task) return json(res, 404, { error: "not found" });

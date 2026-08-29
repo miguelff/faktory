@@ -3,8 +3,27 @@ import type { Phase } from "../../core/types.ts";
 import { buildEngine, requireInstance } from "../context.ts";
 import { selectedConfig, withConfigOption } from "../options.ts";
 
-/** Read/write commands over the task table: `sync`, `tasks`, `transition`. */
+/** Read/write commands over the task table: `create`, `sync`, `tasks`, `transition`. */
 export function registerTasks(program: Command): void {
+  withConfigOption(
+    program
+      .command("create <title>")
+      .description("create a new task in the source (owned by this config) in a chosen state")
+      .option("--phase <phase>", "lifecycle phase to create it in", "queued")
+      .option("--priority <n>", "numeric priority (larger = more important)")
+      .option("--note <note>", "note recorded in the audit trail"),
+  ).action(async (title: string, opts) => {
+    const ctx = requireInstance(selectedConfig(opts));
+    const engine = buildEngine(ctx);
+    const task = await engine.createTask({
+      title,
+      phase: opts.phase as Phase,
+      priority: opts.priority != null ? Number(opts.priority) : null,
+      note: opts.note,
+    });
+    console.log(`#${task.id}\t${task.phase}\t${task.title}`);
+  });
+
   withConfigOption(program.command("sync").description("pull candidates from the source into the task table")).action(
     async (opts) => {
       const ctx = requireInstance(selectedConfig(opts));

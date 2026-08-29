@@ -87,6 +87,30 @@ before(async () => {
       );
       return;
     }
+    if (req.method === "POST" && url === "/pages") {
+      const id = `new-${state.pages.size + 1}`;
+      // Mimic Notion echoing back full property objects (with their `type`).
+      const properties: Record<string, any> = {};
+      for (const [name, value] of Object.entries<any>(body.properties)) {
+        const type = value.title ? "title" : value.select ? "select" : value.rich_text ? "rich_text" : value.date ? "date" : value.number !== undefined ? "number" : "unknown";
+        // Notion echoes rich text with plain_text alongside the text object.
+        const withPlain = (arr: any[]) => arr.map((t) => ({ ...t, plain_text: t.text?.content ?? "" }));
+        properties[name] =
+          type === "title" ? { type, title: withPlain(value.title) }
+          : type === "rich_text" ? { type, rich_text: withPlain(value.rich_text) }
+          : { type, ...value };
+      }
+      const created = {
+        id,
+        url: `https://notion.so/${id}`,
+        last_edited_time: "2026-02-02T00:00:00Z",
+        properties,
+      };
+      state.pages.set(id, created);
+      state.patches.push({ id, body });
+      res.end(JSON.stringify(created));
+      return;
+    }
     const pageMatch = /^\/pages\/(.+)$/.exec(url);
     if (pageMatch) {
       const p = state.pages.get(pageMatch[1]!);
@@ -206,6 +230,22 @@ test("claim refuses to overwrite an entry owned by another instance", async () =
   state.patches.length = 0;
   assert.equal(await source.claim("p4"), "faktory-rival");
   assert.equal(state.patches.length, 0, "no write at all");
+});
+
+test("createItem creates a page owned by this instance with the given status", async () => {
+  state.dbProperties = { Name: { type: "title" }, Priority: { type: "number" } };
+  const source = makeSource();
+  const item = await source.createItem({ title: "Brand new task", status: "queued", priority: 8 });
+  assert.equal(item.title, "Brand new task");
+  assert.equal(item.status, "queued");
+  assert.equal(item.ownedBy, "faktory-test");
+  assert.equal(item.priority, 8);
+  const created = state.pages.get(item.id).properties;
+  assert.equal(created.Name.title[0].text.content, "Brand new task");
+  assert.equal(created.faktory_status.select.name, "queued");
+  assert.equal(created.faktory_owned_by.rich_text[0].text.content, "faktory-test");
+  assert.ok(created.faktory_owned_at.date.start, "owned_at stamped on creation");
+  assert.equal(created.Priority.number, 8);
 });
 
 test("setStatus patches faktory_status", async () => {

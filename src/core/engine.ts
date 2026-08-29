@@ -66,6 +66,24 @@ export class Engine {
   }
 
   /**
+   * Create a brand-new work item in the source and record it locally at a
+   * chosen `phase` (default `queued`, so it is immediately dispatchable). The
+   * item is owned by this instance from creation — no claim is needed — and the
+   * source's faktory_status is stamped by the adapter to match the phase.
+   */
+  async createTask(input: { title: string; phase?: Phase; priority?: number | null; note?: string }): Promise<Task> {
+    const title = input.title?.trim();
+    if (!title) throw new Error("title is required");
+    const phase = input.phase ?? "queued";
+    const item = await this.source.createItem({
+      title,
+      status: statusForPhase(phase),
+      priority: input.priority ?? null,
+    });
+    return this.tasks.createOwned(this.source.id, item, phase, "api", input.note);
+  }
+
+  /**
    * Transition a task and mirror faktory_status to the source. Leaving
    * `discovered` first claims ownership (CAS); a lost claim cancels the local
    * task and throws ClaimLostError.

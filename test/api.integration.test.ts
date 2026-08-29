@@ -6,7 +6,7 @@ import { openDb } from "../src/core/db.ts";
 import { Engine } from "../src/core/engine.ts";
 import { createApiServer } from "../src/api/server.ts";
 import type { WorkItem } from "../src/core/types.ts";
-import type { WorkSource } from "../src/sources/types.ts";
+import type { NewWorkItem, WorkSource } from "../src/sources/types.ts";
 
 /**
  * Integration test: real SQLite + real HTTP server on an ephemeral port,
@@ -27,6 +27,24 @@ class FakeSource implements WorkSource {
   }
   async getItem(id: string) {
     return this.items.find((i) => i.id === id) ?? null;
+  }
+  private created = 0;
+  async createItem(input: NewWorkItem) {
+    const id = `created-${++this.created}`;
+    const item: WorkItem = {
+      id,
+      title: input.title,
+      url: `u-${id}`,
+      status: input.status,
+      ownedBy: "faktory-test",
+      ownedAt: new Date().toISOString(),
+      priority: input.priority ?? null,
+      updatedAt: null,
+    };
+    this.items.push(item);
+    this.owners[id] = "faktory-test";
+    this.statuses[id] = input.status;
+    return item;
   }
   async claim(id: string) {
     if (this.owners[id]) return this.owners[id]!;
@@ -87,6 +105,37 @@ test("sync discovers candidates as tasks", async () => {
   assert.equal(again.body.discovered.length, 0, "sync is idempotent");
   const { body: list } = await api("/api/tasks");
   assert.equal(list.tasks.length, 2);
+});
+
+test("create makes an owned task in a chosen state, defaulting to queued", async () => {
+  const res = await api("/api/tasks", {
+    method: "POST",
+    body: JSON.stringify({ title: "Ship the widget", priority: 7 }),
+  });
+  assert.equal(res.status, 201);
+  assert.equal(res.body.task.phase, "queued");
+  assert.equal(res.body.task.title, "Ship the widget");
+  // Owned + status mirrored from birth, no discovered step.
+  assert.equal(source.statuses[res.body.task.itemId], "queued");
+  assert.equal(source.owners[res.body.task.itemId], "faktory-test");
+  const { body: detail } = await api(`/api/tasks/${res.body.task.id}`);
+  assert.deepEqual(detail.events.map((e: any) => e.to), ["queued"]);
+
+  const explicit = await api("/api/tasks", {
+    method: "POST",
+    body: JSON.stringify({ title: "Draft only", phase: "discovered" }),
+  });
+  assert.equal(explicit.body.task.phase, "discovered");
+});
+
+test("create rejects an empty title and an invalid phase", async () => {
+  const noTitle = await api("/api/tasks", { method: "POST", body: JSON.stringify({ title: "  " }) });
+  assert.equal(noTitle.status, 400);
+  const badPhase = await api("/api/tasks", {
+    method: "POST",
+    body: JSON.stringify({ title: "x", phase: "warp" }),
+  });
+  assert.equal(badPhase.status, 400);
 });
 
 test("transition endpoint validates lifecycle and mirrors to the source", async () => {

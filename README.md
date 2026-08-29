@@ -128,6 +128,7 @@ Other commands:
 
 ```sh
 bin/faktory sync   --config omnia            # pull candidates into the task table
+bin/faktory create "Ship the widget" --config omnia   # create a new task (default: queued)
 bin/faktory tasks  --config omnia            # list tasks
 bin/faktory tui    --config omnia            # inspect / repair in the terminal
 bin/faktory invite omnia                     # share this config's datasource

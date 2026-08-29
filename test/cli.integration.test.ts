@@ -30,7 +30,7 @@ async function faktory(args: string[]): Promise<{ code: number; stdout: string; 
 
 // The registry is the spec: every user-facing top-level command must be
 // discoverable from bare `faktory`. Update this list when you add one.
-const TOP_LEVEL = ["serve", "setup", "config", "source", "sync", "tasks", "transition", "tui", "orchestrate", "invite", "join"];
+const TOP_LEVEL = ["serve", "setup", "config", "source", "create", "sync", "tasks", "transition", "tui", "orchestrate", "invite", "join"];
 
 test("no arguments prints subcommands and options on stdout, exit 0", async () => {
   const res = await faktory([]);
@@ -64,6 +64,14 @@ test("per-command help documents options non-interactively", async () => {
   assert.equal(res.code, 0);
   assert.match(res.stdout, /<id> <phase>/);
   assert.match(res.stdout, /--force/);
+  assert.match(res.stdout, /-c, --config/);
+});
+
+test("create documents its title arg, phase, and config options", async () => {
+  const res = await faktory(["create", "--help"]);
+  assert.equal(res.code, 0);
+  assert.match(res.stdout, /<title>/);
+  assert.match(res.stdout, /--phase/);
   assert.match(res.stdout, /-c, --config/);
 });
 

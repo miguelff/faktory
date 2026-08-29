@@ -20,6 +20,14 @@ export interface WorkSource {
   getItem(itemId: string): Promise<WorkItem | null>;
 
   /**
+   * Create a brand-new work item in the backing database, already owned by this
+   * instance (creation implies ownership — there is nothing to claim). The
+   * adapter stamps faktory_owned_by/_owned_at with the instance prefix and sets
+   * faktory_status to the requested value. Returns the normalized WorkItem.
+   */
+  createItem(input: NewWorkItem): Promise<WorkItem>;
+
+  /**
    * Claim ownership of an item (CAS): stamp faktory_owned_by/_owned_at only
    * if it is still unowned. Resolves to the winning owner — equal to this
    * instance's prefix on success, another prefix when the claim was lost.
@@ -42,6 +50,15 @@ export interface WorkSource {
    * database can be pointed at as-is. Returns the properties created.
    */
   ensureProperties?(): Promise<string[]>;
+}
+
+/** Fields needed to create a new work item in a source. */
+export interface NewWorkItem {
+  title: string;
+  /** faktory_status to stamp on creation (e.g. the phase's mirrored status). */
+  status: string;
+  /** Optional numeric priority (source maps its own scale). */
+  priority?: number | null;
 }
 
 /** Persisted (non-secret) source configuration. */
