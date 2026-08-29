@@ -153,3 +153,38 @@ test("dispatch without herdr returns 503", async () => {
   const res = await api("/api/tasks/2/dispatch", { method: "POST", body: "{}" });
   assert.equal(res.status, 503);
 });
+
+test("dispatch refuses to process a task that is not queued", async () => {
+  // Fresh source + server so we can assert the guard runs before any side
+  // effect (claim/status mirror), independent of the no-herdr 503 path.
+  const db = openDb(":memory:");
+  db.prepare("INSERT INTO sources (id, kind, config) VALUES ('primary', 'fake', '{}')").run();
+  const src = new FakeSource();
+  src.items = [workItem("g1", "Guarded", 1)];
+  const engine = new Engine(db, src, { prefix: "faktory-guard" });
+  const herdrCalls: string[] = [];
+  const fakeHerdr = {
+    request: async (method: string) => {
+      herdrCalls.push(method);
+      return {} as any;
+    },
+  } as any;
+  const guarded = createApiServer({ engine, prefix: "faktory-guard", herdr: fakeHerdr });
+  await new Promise<void>((r) => guarded.listen(0, "127.0.0.1", r));
+  const guardedBase = `http://127.0.0.1:${(guarded.address() as AddressInfo).port}`;
+  try {
+    await fetch(`${guardedBase}/api/sync`, { method: "POST" });
+    const list = (await (await fetch(`${guardedBase}/api/tasks`)).json()) as any;
+    const taskId = list.tasks.find((x: any) => x.itemId === "g1").id;
+    const res = await fetch(`${guardedBase}/api/tasks/${taskId}/dispatch`, { method: "POST", body: "{}" });
+    assert.equal(res.status, 409, "a discovered task cannot be dispatched");
+    const detail = (await (await fetch(`${guardedBase}/api/tasks/${taskId}`)).json()) as any;
+    assert.equal(detail.task.phase, "discovered", "task is left untouched");
+    assert.equal(src.owners.g1, undefined, "no ownership claimed before queued");
+    assert.equal(src.statuses.g1, undefined, "no status mirrored before queued");
+    assert.deepEqual(herdrCalls, [], "no herdr work before queued");
+  } finally {
+    guarded.closeAllConnections();
+    guarded.close();
+  }
+});

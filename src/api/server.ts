@@ -71,6 +71,13 @@ export function createApiServer(deps: ApiDeps): Server {
     const id = Number(p.id);
     const task = deps.engine.tasks.byId(id);
     if (!task) return json(res, 404, { error: "not found" });
+    // The loop must not start processing anything until the task is queued.
+    // Guard here — before any claim or herdr work — so a non-queued task is
+    // left untouched (no ownership claim, no failed transition) instead of
+    // being dragged partway through dispatch.
+    if (task.phase !== "queued") {
+      return json(res, 409, { error: `task ${id} is ${task.phase}, not queued`, task });
+    }
     try {
       await deps.engine.transition(id, "dispatching", "api", "dispatch requested");
       const opts: DispatchOptions = {
