@@ -135,14 +135,27 @@ prefix so instances never collide on one database:
 An entry is discoverable by every instance while `faktory_owned_by` is empty;
 the instance that wins the claim (on leaving `backlog`) manages it from then on.
 
-**The datasource is the source of truth for lifecycle state.** Every transition
-is *datasource-first*: validate legality → claim (CAS) if leaving `backlog` →
-write `faktory_status` to the datasource → only then update the local
-projection. The projection can therefore never get ahead of the datasource, so
-local and remote cannot drift (the class of “syncing problems” simply cannot
-arise). A wiped/rebuilt local DB recovers each owned task's phase by reading
-`faktory_status` back. The SQLite DB below is a **projection + local
-operational store**, never an independent authority for phase.
+**The datasource is the source of truth for lifecycle state.** Every task state
+operation goes through a **remote proxy**: it is enqueued in the local `outbox`,
+written to the datasource first (validate legality → claim (CAS) if leaving
+`backlog` → write `faktory_status`, or post the papertrail comment), and only
+**projected onto the local snapshot once the datasource acknowledges it**. A
+write that fails because the datasource is unavailable stays pending and is
+retried on a backoff — it is never lost and never applied locally ahead of the
+datasource. There is no local-first / offline mode. The projection can
+therefore never get ahead of the datasource, so local and remote cannot drift
+(the class of “syncing problems” simply cannot arise). A wiped/rebuilt local DB
+recovers each owned task's phase by reading `faktory_status` back.
+
+**Reconciliation + error log.** A periodic reconciliation job (each engine tick,
+~5s) reads the datasource and, for every task this instance manages, flags an
+error whenever a value differs remotely vs locally (phase, ownership, or the
+entry gone missing). Those inconsistencies — plus a write-through that keeps
+failing and a lost CAS — live in the **local `errors` log, never in the
+datasource**; an operator views them in the TUI (`e`) or the API and marks them
+resolved. The SQLite DB below is a disposable **snapshot + local operational
+store**, never an independent authority for phase; the schema is a single
+declaration (no migrations) and is rebuilt from the datasource on demand.
 
 Each instance keeps its own state under `~/.faktory/<slug>/` (SQLite DB,
 secrets, logs) and runs its own API/TUI on its own port. The remote board is
@@ -162,7 +175,11 @@ queue, the action feed) or purely a cache for fast TUI/loop reads.
 - `task_stages` — herdr tab/agent per pipeline stage of a task
 - `inbox` — typed agent→loop messages (the channel), with applied/outcome
 - `feed` — append-only action feed (dispatches, transitions, inbox verdicts…)
-- `herdr_events` — raw herdr events (reserved for repair)
+- `outbox` — durable intent for every datasource write; pending until the
+  datasource acknowledges, then the local effect is projected (retried on a
+  backoff while the datasource is unavailable)
+- `errors` — the local error log: flagged inconsistencies (failed write-through,
+  lost CAS, reconcile drift), open until an operator resolves them
 
 ## Interfaces
 
