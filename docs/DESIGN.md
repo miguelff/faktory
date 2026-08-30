@@ -12,8 +12,8 @@ itself, and manages herdr workspaces/panes/agents through herdr's socket API.
 │  │  Notion   │  listCandidates   │  SQLite (config + state + inbox)│    │
 │  │  (Jira)   │◀─────────────────▶│  Lifecycle state machine       │     │
 │  │  (GitHub) │  setStatus/tags   │  ENGINE LOOP (deterministic):   │    │
-│  └───────────┘                   │   sync · drain inbox · reconcile│    │
-│        ▲                          │   · WIP · dispatch per stage   │     │
+│  └───────────┘                   │   sync · drain inbox · dispatch │    │
+│        ▲                          │   · handoffs · dispatch/role   │     │
 │        │                          └───────────────────────────────┘     │
 │        │                              │            ▲                    │
 │        ▼                              ▼            │ herdr socket + CLI │
@@ -37,12 +37,13 @@ orchestrator agent is gone: a programmatic **engine loop** runs inside the
 
 1. **syncs** candidates from the source (new items land in `backlog`);
 2. **drains the inbox** — validates each agent message (origin + transition
-   legality) and serially applies it (advance a stage, annotate, block);
-3. **reconciles** herdr agent state as a safety net (blocked → needs human;
-   quiet-without-a-message → nudge once, then flag as stalled);
-4. **maintains WIP** — promotes from `backlog` (priority-desc) to keep the
-   actionable lanes fed, and dispatches a stage agent to any lane task that is
-   waiting (not yet being worked).
+   legality) and serially applies it (advance a stage, hand off to another
+   lane, annotate, block);
+3. **dispatches** — a stage agent to any lane task that is waiting (not yet
+   being worked), and an interactive unblocking session to any blocked task
+   without one. The loop never promotes from `backlog`: that move is a
+   human's, and it never second-guesses a running session — herdr itself
+   surfaces an agent that is asking for input.
 
 Agents are like goroutines: independent workers with no access to shared state.
 The **inbox** is the channel; the loop is the coordinator. Agents never mutate
@@ -81,23 +82,30 @@ interface WorkSource {
 Internal, source-independent phases stored in SQLite:
 
 ```
-backlog → to_shape → to_execute → to_review → ready → done
-   └──────── (blocked, resumes its lane) ───────┘
-   └──────── (archived, revivable to backlog) ──┘
+backlog → shape → execute → review → release → done → archived
+              └── execute/review/release → blocked (resumes its lane) ──┘
 ```
+
+Only a human moves `backlog → shape` and `done → archived`. Shaping never
+blocks: it is an interactive session that ends — on the human's word — back in
+`backlog` or on to `execute`. Agents route a task to another lane with a
+`handoff` inbox message (review → execute for rework, blocked → its lane on
+resolution); each one is mirrored to the source as a `<handoff from to>`
+comment, so the task's comment feed is the papertrail. A `blocked` task gets an
+interactive unblocking session seeded with why it is blocked.
 
 | phase        | meaning                                                       |
 |--------------|--------------------------------------------------------------|
 | `backlog`    | discovered candidate, unclaimed; the loop feeds it forward    |
-| `to_shape`   | actionable lane: a shaping agent grills the human to a spec   |
-| `to_execute` | actionable lane: an agent implements the shaped spec          |
-| `to_review`  | actionable lane: a blind-review agent judges the change       |
-| `ready`      | review passed / PR ready — awaiting merge or deploy           |
+| `shape`      | actionable lane: a shaping agent grills the human to a spec   |
+| `execute`    | actionable lane: an agent implements the shaped spec          |
+| `review`     | actionable lane: a blind-review agent judges the change       |
+| `release`    | review passed / PR ready — awaiting merge or deploy           |
 | `done`       | terminal success                                             |
-| `blocked`    | out-of-band: needs a human (agent asked, herdr-blocked, stall)|
+| `blocked`    | out-of-band: needs a human (an agent handed off to it)        |
 | `archived`   | out-of-band: removed from the board (revivable to `backlog`)  |
 
-The three **actionable lanes** (`to_shape, to_execute, to_review`) are the
+The four **actionable lanes** (`shape, execute, review, release`) are the
 loop's inboxes. A lane task is either *being worked* (a stage agent is
 dispatched — `dispatched_at`/`agent_name` set) or *waiting* for the loop to
 dispatch one. Ownership (CAS on `faktory_owned_by`) is claimed the moment a task
@@ -146,7 +154,7 @@ The datasource owns lifecycle state (phase, ownership); SQLite projects it and
 holds data that is inherently local/per-operator (herdr coordinates, the inbox
 queue, the action feed) or purely a cache for fast TUI/loop reads.
 
-- `config` — key/value app config (source, `wip`, repo path, port…)
+- `config` — key/value app config (source, repo path, port…)
 - `sources` — configured work sources (kind + JSON config, secrets by ref)
 - `secrets` — oauth tokens / API keys (local file, `chmod 600`)
 - `tasks` — one row per work item (phase, stage, `dispatched_at`, herdr ids, PR…)
@@ -176,25 +184,30 @@ per pipeline stage** inside it; dispatch = `worktree.create` (first stage) →
 Archiving a task closes its space (`workspace.close`), taking its conversations
 with it.
 
-**Attention.** herdr models agent status as `idle | working | blocked | done |
-unknown`. The loop reconciles this against the inbox: herdr-`blocked` or
-`absent` → the task is blocked (needs a human) regardless of the inbox;
-`idle`/`done` with no message → nudge once, then only *flag* it in the feed for
-human attention (an actionable lane like `to_shape` is a live conversation where
-the agent legitimately sits idle, so the session is never torn down). Completion
-is only ever declared by a `completed` inbox message from the current dispatched
-agent — silence is never read as success, and unsigned/mismatched or
-stray-duplicate messages are rejected.
+**Attention.** herdr owns the "agent needs you" UX: it surfaces an agent that
+is asking for input or blocked on a permission prompt, and every faktory
+session is an interactive conversation the human can join in its tab (`w` from
+the board). The loop never nudges, flags, or tears down a quiet session, and
+never declares an agent dead. A task moves only on a terminal `handoff` inbox
+message from the current dispatched agent — silence is never read as success,
+and unsigned/mismatched or stray-duplicate messages are rejected.
+
+**Assignment auto-repair.** The one thing the loop does verify is referential
+integrity: each tick it checks recorded task assignments (workspace id, agent
+name) against herdr's live inventory. A coordinate that no longer exists —
+session recreated, workspace closed by hand — is cleared and the role is
+reprovisioned with the papertrail; existence only, never liveness, and an
+unreachable herdr repairs nothing (gone and can't-ask are different).
 
 ## Installer & onboarding
 
-Faktory ships a macOS installer (`install.sh` + `faktory setup`) so a fresh
+Faktory ships a macOS installer (`install.sh` + `faktory config new`) so a fresh
 machine needs nothing pre-installed:
 
 1. **Bootstrap** (`install.sh`): installs Homebrew if missing, then `node`,
    `pnpm`, `herdr`, and `pi` (plus optional `claude`/`codex` harnesses).
 2. **Defaults**: herdr always, pi always as the stage-agent harness.
-3. **Auth wizard** (`faktory setup`): walks through authenticating pi against
+3. **Auth wizard** (`faktory config new`): walks through authenticating pi against
    an agent-harness provider (Anthropic/OpenAI/etc.), verifies herdr's socket,
    then configures a work source (Notion OAuth or integration token → pick
    database → pick candidacy property/value → map status + tags).

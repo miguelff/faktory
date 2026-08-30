@@ -1,8 +1,12 @@
 import { execFile } from "node:child_process";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { promisify } from "node:util";
 import { setTimeout as sleep } from "node:timers/promises";
 import type { HerdrClient } from "./client.ts";
-import type { Stage, Task } from "../core/types.ts";
+import type { Role, Task } from "../core/types.ts";
+import type { RolePrompts } from "../core/stages.ts";
 
 const exec = promisify(execFile);
 
@@ -42,7 +46,7 @@ export function taskSpaceLabel(prefix: string, task: Task): string {
   return `${prefix}:t${task.id}`;
 }
 
-export function stageAgentName(prefix: string, taskId: number, stage: Stage): string {
+export function stageAgentName(prefix: string, taskId: number, stage: Role): string {
   return `${prefix}-t${taskId}-${stage}`;
 }
 
@@ -70,18 +74,43 @@ async function waitForIdleShell(herdr: HerdrClient, paneId: string, timeoutMs = 
   throw new Error(`pane ${paneId} did not reach an idle shell within ${timeoutMs / 1000}s`);
 }
 
+/**
+ * Harnesses whose system prompt can be extended from a FILE on their command
+ * line (appended to their own, so AGENTS.md and the coding baseline stay
+ * intact). The role's standing orders go there — they survive context
+ * compaction. It must be a file: herdr refuses agent arguments it cannot
+ * encode safely for the pane's shell, and the standing orders are multiline —
+ * only a path travels safely. Other kinds get the system text prepended to
+ * the kickoff message instead.
+ */
+const SYSTEM_PROMPT_FILE_FLAG: Readonly<Record<string, string>> = {
+  pi: "--append-system-prompt", // "Append text or file contents to the system prompt"
+};
+
+/** Write the standing orders where the agent's flag can read them (stable per agent). */
+function writeSystemPromptFile(agentName: string, text: string): string {
+  const dir = join(tmpdir(), "faktory-prompts");
+  mkdirSync(dir, { recursive: true });
+  const path = join(dir, `${agentName}.system.md`);
+  writeFileSync(path, text);
+  return path;
+}
+
 /** Start an agent, retrying through the transient `agent_pane_busy` window. */
 async function startAgentWithRetry(
   agentName: string,
   agentKind: string,
   paneId: string,
+  agentArgs: string[],
   timeoutMs = 30_000,
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
+  const args = ["agent", "start", agentName, "--kind", agentKind, "--pane", paneId];
+  if (agentArgs.length) args.push("--", ...agentArgs);
   for (;;) {
     try {
       // The CLI owns interactive readiness detection for agent startup.
-      await exec("herdr", ["agent", "start", agentName, "--kind", agentKind, "--pane", paneId]);
+      await exec("herdr", args);
       return;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -104,16 +133,44 @@ async function ensureTaskSpace(
 ): Promise<{ workspaceId: string; branch: string; rootPaneId?: string }> {
   const branch = task.branch ?? branchNameFor(task, prefix);
   if (task.workspaceId) return { workspaceId: task.workspaceId, branch };
-  const created = await herdr.request<any>("worktree.create", {
+  const params = {
     ...(opts.repoWorkspaceId ? { workspace_id: opts.repoWorkspaceId } : {}),
     ...(opts.repoCwd ? { cwd: opts.repoCwd } : {}),
     branch,
     label: taskSpaceLabel(prefix, task),
     focus: false,
-  });
+  };
+  // The git worktree outlives the herdr session: after a session restart (or a
+  // repaired stale assignment) the branch's worktree is still on disk, and
+  // `worktree.create` fails on it. A task that already has a branch recorded
+  // was provisioned before — reattach first; fall back to reattaching when a
+  // fresh create trips over leftovers on disk.
+  const created = task.branch
+    ? await reattachOrCreateWorktree(herdr, params)
+    : await createOrReattachWorktree(herdr, params);
   const workspaceId = idOf(created.workspace)!;
   const rootPaneId = idOf(created.root_pane);
   return { workspaceId, branch, rootPaneId };
+}
+
+async function reattachOrCreateWorktree(herdr: HerdrClient, params: Record<string, unknown>): Promise<any> {
+  try {
+    return await herdr.request<any>("worktree.open", params);
+  } catch {
+    return herdr.request<any>("worktree.create", params);
+  }
+}
+
+async function createOrReattachWorktree(herdr: HerdrClient, params: Record<string, unknown>): Promise<any> {
+  try {
+    return await herdr.request<any>("worktree.create", params);
+  } catch (err) {
+    try {
+      return await herdr.request<any>("worktree.open", params);
+    } catch {
+      throw err; // the create failure is the informative one
+    }
+  }
 }
 
 /**
@@ -123,7 +180,7 @@ async function ensureTaskSpace(
 async function openStageTab(
   herdr: HerdrClient,
   workspaceId: string,
-  stage: Stage,
+  stage: Role,
   cwd: string | undefined,
   rootPaneId: string | undefined,
 ): Promise<string> {
@@ -156,8 +213,8 @@ async function openStageTab(
 export async function dispatchStage(
   herdr: HerdrClient,
   task: Task,
-  stage: Stage,
-  prompt: string,
+  stage: Role,
+  prompts: RolePrompts,
   prefix: string,
   opts: DispatchOptions,
 ): Promise<StageDispatch> {
@@ -165,8 +222,10 @@ export async function dispatchStage(
   const paneId = await openStageTab(herdr, workspaceId, stage, opts.repoCwd, rootPaneId);
   const agentName = stageAgentName(prefix, task.id, stage);
   await waitForIdleShell(herdr, paneId);
-  await startAgentWithRetry(agentName, opts.agentKind, paneId);
-  await herdr.request("agent.prompt", { target: agentName, text: prompt });
+  const flag = SYSTEM_PROMPT_FILE_FLAG[opts.agentKind];
+  await startAgentWithRetry(agentName, opts.agentKind, paneId, flag ? [flag, writeSystemPromptFile(agentName, prompts.system)] : []);
+  const kickoff = flag ? prompts.kickoff : `${prompts.system}\n\n${prompts.kickoff}`;
+  await herdr.request("agent.prompt", { target: agentName, text: kickoff });
   return { workspaceId, paneId, agentName, branch };
 }
 

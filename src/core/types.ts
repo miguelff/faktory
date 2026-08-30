@@ -2,17 +2,17 @@
  * Faktory pipeline phases (source-independent, stored in SQLite).
  *
  * The happy path is a straight pipeline
- *   backlog → to_shape → to_execute → to_review → ready → done
+ *   backlog → shape → execute → review → release → done
  * plus two out-of-band states: `blocked` (needs a human) and `archived`
  * (removed from the board). `backlog` is the pre-claim, discoverable state;
  * ownership is taken (CAS) the moment a task leaves it.
  */
 export const PHASES = [
   "backlog",
-  "to_shape",
-  "to_execute",
-  "to_review",
-  "ready",
+  "shape",
+  "execute",
+  "review",
+  "release",
   "done",
   "blocked",
   "archived",
@@ -25,10 +25,32 @@ export const TERMINAL_PHASES: readonly Phase[] = ["done", "archived"];
 
 /**
  * The actionable lanes: each one has a stage agent that does the work and
- * reports back through the inbox. The loop keeps these lanes fed (WIP).
+ * reports back through the inbox. The loop dispatches an agent to any lane
+ * task that is waiting; only a human moves a task out of `backlog`.
  */
-export const STAGES = ["to_shape", "to_execute", "to_review"] as const;
+export const STAGES = ["shape", "execute", "review", "release"] as const;
 export type Stage = (typeof STAGES)[number];
+
+/**
+ * What the loop can dispatch an agent for: a lane's stage work, or the
+ * interactive unblocking session it opens on a blocked task.
+ */
+export type Role = Stage | "unblock";
+
+/**
+ * Full detail of a work item, fetched on demand — agents pull it as JSON via
+ * `faktory task show <id> --json` instead of having it inlined into prompts.
+ */
+export interface WorkItemDetails {
+  /** The item's title in the source. */
+  title: string;
+  /** The item's content as markdown (a Notion page's blocks, an issue body, …). */
+  body: string;
+  /** The comment feed, oldest first — the papertrail of handoffs plus human comments. */
+  trail: string[];
+  /** Source-native properties (a Notion page's non-faktory properties, labels, …). */
+  meta: Record<string, unknown>;
+}
 
 /** A normalized unit of work coming from any source. */
 export interface WorkItem {
@@ -61,16 +83,14 @@ export interface Task {
   workspaceId: string | null;
   paneId: string | null;
   agentName: string | null;
-  /** The actionable stage currently dispatched (null when none is running). */
-  stage: Stage | null;
+  /** The role currently dispatched (a lane stage or `unblock`; null when none). */
+  stage: Role | null;
   /**
    * When the current stage agent was dispatched — the explicit "being worked"
    * signal. Null means the task is waiting in its lane for the loop to pick it
    * up; non-null means an agent is (or was) actively on it.
    */
   dispatchedAt: string | null;
-  /** Phase to return to when a `blocked` task is unblocked. */
-  resumePhase: Phase | null;
   branch: string | null;
   prUrl: string | null;
   error: string | null;
@@ -88,23 +108,29 @@ export interface TaskEvent {
   note: string | null;
 }
 
-/** herdr coordinates for one stage tab inside a task's space. */
+/** herdr coordinates for one role tab inside a task's space. */
 export interface TaskStage {
   id: number;
   taskId: number;
-  stage: Stage;
+  stage: Role;
   paneId: string | null;
   agentName: string | null;
   createdAt: string;
 }
 
-/** Typed message an agent writes to the inbox. Only the loop acts on these. */
-export type InboxType = "completed" | "needs_human" | "note";
+/**
+ * Typed message an agent writes to the inbox. Only the loop acts on these.
+ * `handoff` moves the task to another legal lane (`data.to`) — the next
+ * pipeline lane when the role is done (shape → execute … release → done),
+ * review back to execute for rework, blocked when only a human can resolve
+ * something; `note` annotates the papertrail with no transition.
+ */
+export type InboxType = "handoff" | "note";
 
 export interface InboxMessage {
   id: number;
   taskId: number;
-  stage: Stage | null;
+  stage: Role | null;
   type: InboxType;
   /** herdr agent name that sent it (validated against the task's stage agent). */
   sender: string | null;

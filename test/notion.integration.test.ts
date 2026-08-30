@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { createSource } from "../src/sources/factory.ts";
-import { buildCandidateFilter, pageToWorkItem, type NotionSourceConfig } from "../src/sources/notion.ts";
+import { blocksToMarkdown, buildCandidateFilter, pageMeta, pageToWorkItem, type NotionSourceConfig } from "../src/sources/notion.ts";
 
 /**
  * Integration test: the Notion adapter against a fake Notion API server.
@@ -64,6 +64,29 @@ before(async () => {
     if (url === "/databases/db-1" && req.method === "PATCH") {
       Object.assign(state.dbProperties, body.properties);
       res.end("{}");
+      return;
+    }
+    if (req.method === "GET" && url.startsWith("/comments?")) {
+      const pageId = new URL(url, "http://x").searchParams.get("block_id");
+      res.end(
+        JSON.stringify({
+          results: state.comments
+            .filter((c) => c.pageId === pageId)
+            .map((c) => ({ rich_text: [{ plain_text: c.text }] })),
+          has_more: false,
+        }),
+      );
+      return;
+    }
+    if (req.method === "GET" && /^\/blocks\/[^/]+\/children/.test(url)) {
+      const blocks = [
+        { type: "heading_1", heading_1: { rich_text: [{ plain_text: "Context" }] } },
+        { type: "paragraph", paragraph: { rich_text: [{ plain_text: "Users want a widget. " }, { plain_text: "spec", href: "https://spec" }] } },
+        { type: "bulleted_list_item", bulleted_list_item: { rich_text: [{ plain_text: "small" }] } },
+        { type: "to_do", to_do: { checked: true, rich_text: [{ plain_text: "agreed" }] } },
+        { type: "code", code: { language: "ts", rich_text: [{ plain_text: "x()" }] } },
+      ];
+      res.end(JSON.stringify({ results: blocks, has_more: false }));
       return;
     }
     if (req.method === "POST" && url === "/comments") {
@@ -250,4 +273,50 @@ test("buildCandidateFilter honours custom property names", () => {
 test("buildCandidateFilter excludes finished (done) entries", () => {
   const f = buildCandidateFilter(cfg, "faktory-x") as any;
   assert.deepEqual(f.and[1], { property: "faktory_status", select: { does_not_equal: "done" } });
+});
+
+test("details returns title, the page as markdown, the comment trail, and meta", async () => {
+  const source = makeSource();
+  state.comments.push({ pageId: "p1", text: '<handoff from="shape" to="execute">the spec</handoff>' });
+  const d = await source.details("p1");
+  assert.equal(d.title, "Task p1");
+  assert.equal(
+    d.body,
+    ["# Context", "Users want a widget. [spec](https://spec)", "- small", "- [x] agreed", "```ts", "x()", "```"].join("\n"),
+  );
+  assert.deepEqual(d.trail, ['<handoff from="shape" to="execute">the spec</handoff>']);
+  assert.deepEqual(d.meta, { Priority: 5 }, "faktory-managed columns and the title stay out of meta");
+});
+
+test("blocksToMarkdown renders the common blocks and degrades gracefully", () => {
+  const md = blocksToMarkdown([
+    { type: "heading_2", heading_2: { rich_text: [{ plain_text: "Plan" }] } },
+    { type: "numbered_list_item", numbered_list_item: { rich_text: [{ plain_text: "first" }] } },
+    { type: "numbered_list_item", numbered_list_item: { rich_text: [{ plain_text: "second" }] } },
+    { type: "quote", quote: { rich_text: [{ plain_text: "verbatim" }] } },
+    { type: "divider", divider: {} },
+    { type: "some_new_block", some_new_block: { rich_text: [{ plain_text: "still shown" }] } },
+    { type: "unsupported_without_text", unsupported_without_text: {} },
+  ]);
+  assert.equal(md, ["## Plan", "1. first", "2. second", "> verbatim", "---", "still shown"].join("\n"));
+});
+
+test("pageMeta keeps source-native properties and drops faktory internals + title", () => {
+  const meta = pageMeta(
+    {
+      properties: {
+        Name: { type: "title", title: [{ plain_text: "T" }] },
+        faktory_status: { type: "select", select: { name: "shape" } },
+        faktory_owned_by: { type: "rich_text", rich_text: [] },
+        faktory_owned_at: { type: "date", date: null },
+        Priority: { type: "number", number: 3 },
+        Tags: { type: "multi_select", multi_select: [{ name: "bug" }, { name: "ui" }] },
+        Due: { type: "date", date: { start: "2026-09-01" } },
+        Done: { type: "checkbox", checkbox: false },
+        Spec: { type: "url", url: "https://spec" },
+      },
+    },
+    cfg,
+  );
+  assert.deepEqual(meta, { Priority: 3, Tags: ["bug", "ui"], Due: "2026-09-01", Done: false, Spec: "https://spec" });
 });

@@ -25,7 +25,7 @@ export function registerCollab(program: Command): void {
     const sourceRow = db.prepare("SELECT id, kind, config FROM sources LIMIT 1").get() as
       | { id: string; kind: string; config: string }
       | undefined;
-    if (!sourceRow) throw new Error(`config "${ref.slug}" has no source to share — run faktory setup first`);
+    if (!sourceRow) throw new Error(`config "${ref.slug}" has no source to share — run faktory config new first`);
     const config = JSON.parse(sourceRow.config) as Record<string, unknown>;
     const secretKey = (config.tokenSecret as string | undefined) ?? "notion.token";
     const secret = getSecret(db, secretKey) ?? undefined;

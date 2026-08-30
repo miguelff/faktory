@@ -7,7 +7,7 @@ import { Engine } from "../core/engine.ts";
 import { createSource } from "../sources/factory.ts";
 import { createPrompter, runSetup } from "../setup.ts";
 import { bootstrapDetached } from "../herdr/bootstrap.ts";
-import { attachSession, sessionClient, sessionSocketPath, waitForSession } from "../herdr/session.ts";
+import { attachSession, destroySession, sessionClient, sessionSocketPath, waitForSession } from "../herdr/session.ts";
 
 /**
  * Shared plumbing for the command layer. Commands (`src/cli/commands/*.ts`)
@@ -120,12 +120,12 @@ export async function resolveServeConfig(requested: string | undefined): Promise
           const ref = instanceRef(target);
           const ok = isYes(
             await ui.ask(
-              `Delete "${ref.slug}" and all its local state in ${ref.dir}? Stop any running serve for it first. (y/n)`,
+              `Delete "${ref.slug}"? This stops its herdr session (serve, board, agents) and removes all its local state in ${ref.dir}. (y/n)`,
               "n",
             ),
           );
           if (ok) {
-            removeInstance(ref.slug);
+            deleteConfig(ref.slug);
             console.log(`deleted config "${ref.slug}"`);
           }
         }
@@ -167,6 +167,27 @@ export async function resolveExistingConfig(requested: string | undefined): Prom
  */
 export function sessionNameFor(slug: string): string {
   return `faktory-${slug}`;
+}
+
+/**
+ * Delete a config: tear down its herdr session first (stopping the server
+ * kills every process that depends on it — the serve loop, the board, any
+ * stage agents), then remove its local state directory. Returns false when no
+ * such config exists.
+ */
+export function deleteConfig(slug: string): boolean {
+  const ref = instanceRef(slug);
+  if (!listInstances().includes(ref.slug)) return false;
+  let sessionName = sessionNameFor(ref.slug);
+  try {
+    const db = openDb(ref.dbPath);
+    sessionName = getConfig(db, "herdrSession") ?? sessionName;
+    db.close();
+  } catch {
+    /* unreadable state DB — fall back to the default session name */
+  }
+  if (destroySession(sessionName)) console.log(`stopped herdr session "${sessionName}" (and everything running in it)`);
+  return removeInstance(ref.slug);
 }
 
 /** Detached workbench: the serve tab (API + engine loop) and the board tab (TUI). */

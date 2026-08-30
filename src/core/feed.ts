@@ -6,7 +6,7 @@ import type { FeedEntry } from "./types.ts";
  * (syncs, transitions, dispatches, inbox verdicts, stalls). The TUI renders
  * the tail alongside the kanban board so an operator can watch the loop work.
  */
-export type FeedKind = "sync" | "transition" | "dispatch" | "inbox" | "annotation" | "stall" | "error";
+export type FeedKind = "sync" | "transition" | "dispatch" | "inbox" | "annotation" | "stall" | "repair" | "error";
 
 export interface FeedDraft {
   taskId?: number | null;

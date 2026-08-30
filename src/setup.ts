@@ -12,8 +12,8 @@ import type { Invite } from "./core/invite.ts";
 /**
  * Terminal setup wizard. Produces one config under ~/.faktory/<slug>/ (its own
  * SQLite state database, secrets included), tagged with the config name.
- * Serve runs it automatically when no config exists; `faktory setup` re-runs
- * it standalone. Everything has a default; Enter accepts it; Ctrl+C aborts
+ * Serve runs it automatically when no config exists; `faktory config new`
+ * runs it standalone. Everything has a default; Enter accepts it; Ctrl+C aborts
  * safely (nothing half-written until the final confirmation).
  */
 const NOTION = "https://api.notion.com/v1";
@@ -159,38 +159,144 @@ interface PickedDatabase {
   created?: boolean;
 }
 
-async function pickOrCreateDatabase(ui: Prompter, token: string): Promise<PickedDatabase> {
-  console.log(DIM("\n  Looking up databases shared with your integration…"));
-  const search = await notion(token, "/search", {
-    method: "POST",
-    body: JSON.stringify({ filter: { value: "database", property: "object" }, page_size: 25 }),
-  });
-  const dbs: PickedDatabase[] = (search.results as any[]).map((d) => ({
-    id: d.id as string,
-    title: (d.title ?? []).map((t: any) => t.plain_text).join("") || "(untitled)",
-  }));
-  const CREATE: PickedDatabase = { id: "", title: "(create a new backlog database)" };
-  const choice = dbs.length
-    ? await ui.pick("Which database is the backlog?", [...dbs, CREATE], (d) => (d.id ? `${d.title} ${DIM(d.id)}` : d.title))
-    : CREATE;
-  if (choice.id) return choice;
+interface NotionRef {
+  id: string;
+  title: string;
+}
 
-  if (!dbs.length) console.log(DIM("  No databases are shared with the integration yet — let's create one."));
-  const pages = await notion(token, "/search", {
+/**
+ * Extract the object id from a pasted Notion link (or a bare id). Handles
+ * dashed and undashed ids, page/database links, and peek links (?p=<id> wins —
+ * that is the page actually open). Returns the dashed UUID form, or null.
+ */
+export function notionIdFromLink(input: string): string | null {
+  const dash = (hex: string) =>
+    `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+  const compact = input.trim().replace(/-/g, "");
+  const peek = compact.match(/[?&]p=([0-9a-f]{32})\b/i);
+  if (peek) return dash(peek[1]!.toLowerCase());
+  const path = compact.split("?")[0]!;
+  // The id ends the URL slug, but the slug itself may end in hex-looking
+  // letters (…-Area-<id> → "ea" + id is one 34-char hex run), so match maximal
+  // hex runs and keep the LAST 32 characters of the last one.
+  const runs = path.match(/[0-9a-f]{32,}/gi);
+  return runs?.length ? dash(runs[runs.length - 1]!.slice(-32).toLowerCase()) : null;
+}
+
+function databaseTitle(db: any): string {
+  return ((db.title ?? []) as any[]).map((t) => t.plain_text).join("") || "(untitled)";
+}
+
+function pageTitle(page: any): string {
+  return (
+    Object.values<any>(page.properties ?? {})
+      .find((prop: any) => prop.type === "title")
+      ?.title?.map((t: any) => t.plain_text)
+      .join("") || "(untitled page)"
+  );
+}
+
+/** The databases living directly inside a page (child_database blocks). */
+async function childDatabases(token: string, pageId: string): Promise<NotionRef[]> {
+  const out: NotionRef[] = [];
+  let cursor: string | undefined;
+  do {
+    const res = await notion(token, `/blocks/${pageId}/children?page_size=100${cursor ? `&start_cursor=${cursor}` : ""}`);
+    for (const block of res.results as any[]) {
+      if (block.type === "child_database") out.push({ id: block.id, title: block.child_database?.title || "(untitled)" });
+    }
+    cursor = res.has_more ? res.next_cursor : undefined;
+  } while (cursor);
+  return out;
+}
+
+/**
+ * Resolve a pasted link to the backlog database. The link may point at the
+ * database itself or at the page containing it (then its child databases are
+ * listed to pick from). Loops until something resolves; every miss explains
+ * the likely cause (not shared with the integration).
+ */
+async function askForDatabase(ui: Prompter, token: string): Promise<NotionRef> {
+  while (true) {
+    const link = await ui.ask("Paste the link to the backlog database (or the page containing it):");
+    const id = notionIdFromLink(link);
+    if (!id) {
+      console.log(ERR("  that doesn't look like a Notion link — copy it in Notion via ••• → Copy link"));
+      continue;
+    }
+    try {
+      const db = await notion(token, `/databases/${id}`);
+      return { id: db.id, title: databaseTitle(db) };
+    } catch {
+      /* not a database — maybe the page containing one */
+    }
+    try {
+      const dbs = await childDatabases(token, id);
+      if (dbs.length === 1) return dbs[0]!;
+      if (dbs.length > 1) return await ui.pick("Which database on that page?", dbs, (d) => `${d.title} ${DIM(d.id)}`);
+      console.log(ERR("  that page contains no database — paste the database's own link or another page"));
+    } catch (err) {
+      console.log(ERR(`  cannot reach that link (${(err as Error).message})`));
+      console.log(DIM("  Share the page or database with the integration in Notion (••• → Connections), then retry."));
+    }
+  }
+}
+
+/** Resolve a pasted link to an existing page (the new database's host). */
+async function askForPage(ui: Prompter, token: string): Promise<NotionRef> {
+  while (true) {
+    const link = await ui.ask("Paste the link to the host page:");
+    const id = notionIdFromLink(link);
+    if (!id) {
+      console.log(ERR("  that doesn't look like a Notion link — copy it in Notion via ••• → Copy link"));
+      continue;
+    }
+    try {
+      const page = await notion(token, `/pages/${id}`);
+      return { id: page.id, title: pageTitle(page) };
+    } catch (err) {
+      console.log(ERR(`  cannot reach that page (${(err as Error).message})`));
+      console.log(DIM("  Share the page with the integration in Notion (••• → Connections), then retry."));
+    }
+  }
+}
+
+async function createPrivateParentPage(token: string, title: string): Promise<NotionRef> {
+  const created = await notion(token, "/pages", {
     method: "POST",
-    body: JSON.stringify({ filter: { value: "page", property: "object" }, page_size: 25 }),
+    body: JSON.stringify({
+      parent: { type: "workspace", workspace: true },
+      properties: { title: { title: [{ type: "text", text: { content: title } }] } },
+    }),
   });
-  const parents = (pages.results as any[]).map((p) => ({
-    id: p.id as string,
-    title:
-      Object.values<any>(p.properties ?? {})
-        .find((prop: any) => prop.type === "title")
-        ?.title?.map((t: any) => t.plain_text)
-        .join("") || "(untitled page)",
-  }));
-  if (!parents.length)
-    throw new Error("No pages visible to host the database. Share a page with the integration in Notion (••• → Connections).");
-  const parent = await ui.pick("Which page should host the new database?", parents, (p) => `${p.title} ${DIM(p.id)}`);
+  return { id: created.id, title };
+}
+
+async function pickParentPage(ui: Prompter, token: string): Promise<NotionRef> {
+  const PRIVATE = "Create a new private page";
+  const LINK = "Paste a link to the host page";
+  const where = await ui.pick("Where should the new database live?", [PRIVATE, LINK], (s) => s);
+  if (where === PRIVATE) {
+    const title = await ui.ask("Page name?", "Faktory");
+    try {
+      const page = await createPrivateParentPage(token, title);
+      console.log(OK(`  ✔ created private page "${title}"`));
+      return page;
+    } catch (err) {
+      console.log(ERR(`  could not create a private page (${(err as Error).message})`));
+      console.log(DIM("  Internal integrations can't create workspace-level pages — paste a link to an existing page instead."));
+    }
+  }
+  return askForPage(ui, token);
+}
+
+async function pickOrCreateDatabase(ui: Prompter, token: string): Promise<PickedDatabase> {
+  const LINK = "Paste a link to an existing database (or the page containing it)";
+  const CREATE = "Create a new blank database";
+  const how = await ui.pick("Which database is the backlog?", [LINK, CREATE], (s) => s);
+  if (how === LINK) return askForDatabase(ui, token);
+
+  const parent = await pickParentPage(ui, token);
   const title = await ui.ask("Database name?", "Faktory Backlog");
   const created = await notion(token, "/databases", {
     method: "POST",
@@ -200,7 +306,7 @@ async function pickOrCreateDatabase(ui: Prompter, token: string): Promise<Picked
       properties: backlogDatabaseProperties(),
     }),
   });
-  console.log(OK(`  ✔ created database "${title}"`));
+  console.log(OK(`  ✔ created database "${title}" in "${parent.title}"`));
   return { id: created.id, title, created: true };
 }
 
@@ -213,7 +319,7 @@ export interface SetupOptions {
 export async function runSetup(opts: SetupOptions = {}): Promise<string> {
   const ui = createPrompter();
   try {
-    console.log(`\n${B("⚙ faktory setup")} ${DIM("— Enter accepts the default, Ctrl+C aborts")}\n`);
+    console.log(`\n${B("⚙ faktory config new")} ${DIM("— Enter accepts the default, Ctrl+C aborts")}\n`);
 
     // 1. Config name → ~/.faktory/<slug>/
     const name = opts.name ?? (await ui.ask("Config name?", "main"));

@@ -42,7 +42,9 @@ before(async () => {
         if (!line.trim()) continue;
         const msg = JSON.parse(line);
         requests.push({ method: msg.method, params: msg.params });
-        sock.write(JSON.stringify({ id: msg.id, result: handler(msg.method, msg.params) }) + "\n");
+        const out = handler(msg.method, msg.params);
+        if (out && out.__error) sock.write(JSON.stringify({ id: msg.id, error: out.__error }) + "\n");
+        else sock.write(JSON.stringify({ id: msg.id, result: out }) + "\n");
       }
     });
   });
@@ -73,14 +75,13 @@ function task(overrides: Partial<Task> = {}): Task {
     itemId: "p3",
     title: "Ship it",
     url: "u",
-    phase: "to_shape",
+    phase: "shape",
     priority: 1,
     workspaceId: null,
     paneId: null,
     agentName: null,
     stage: null,
     dispatchedAt: null,
-    resumePhase: null,
     branch: null,
     prUrl: null,
     error: null,
@@ -91,7 +92,7 @@ function task(overrides: Partial<Task> = {}): Task {
 }
 
 test("naming helpers are deterministic and namespaced by prefix", () => {
-  assert.equal(stageAgentName("faktory-fk", 3, "to_shape"), "faktory-fk-t3-to_shape");
+  assert.equal(stageAgentName("faktory-fk", 3, "shape"), "faktory-fk-t3-shape");
   assert.equal(taskSpaceLabel("faktory-fk", task()), "faktory-fk:t3");
   assert.match(branchNameFor(task({ title: "Ship it!" }), "faktory-fk"), /^faktory-fk\/3-ship-it$/);
 });
@@ -110,22 +111,25 @@ test("first stage creates the task space (worktree) and reuses its root tab", as
     }
   };
   const d = new HerdrDispatcher(client, "faktory-fk", { agentKind: "pi", repoCwd: "/repo" });
-  const res = await d.dispatchStage(task(), "to_shape", "PROMPT");
+  const res = await d.dispatchStage(task(), "shape", { system: "SYSTEM-ORDERS", kickoff: "KICKOFF" });
 
   assert.equal(res.workspaceId, "ws3");
   assert.equal(res.paneId, "ws3:p1", "first stage reuses the space's root pane");
-  assert.equal(res.agentName, "faktory-fk-t3-to_shape");
+  assert.equal(res.agentName, "faktory-fk-t3-shape");
 
   const wt = requests.find((r) => r.method === "worktree.create")!;
   assert.equal(wt.params.branch, "faktory-fk/3-ship-it");
   assert.equal(wt.params.label, "faktory-fk:t3");
   // The root tab is relabelled for the stage; no extra tab is created.
-  assert.equal(requests.find((r) => r.method === "tab.rename")?.params.label, "to_shape");
+  assert.equal(requests.find((r) => r.method === "tab.rename")?.params.label, "shape");
   assert.ok(!requests.some((r) => r.method === "tab.create"), "first stage reuses the root tab");
 
   const calls = herdrCalls();
-  assert.ok(calls.some((c) => c.includes("agent start faktory-fk-t3-to_shape")));
-  assert.ok(requests.some((r) => r.method === "agent.prompt" && r.params.text === "PROMPT"));
+  const start = calls.find((c) => c.includes("agent start faktory-fk-t3-shape"))!;
+  const path = start.match(/--append-system-prompt (\S+)/)?.[1];
+  assert.ok(path, "pi gets the standing orders via a file (multiline args cannot cross the shell)");
+  assert.equal(readFileSync(path!, "utf8"), "SYSTEM-ORDERS", "the file carries the standing orders");
+  assert.ok(requests.some((r) => r.method === "agent.prompt" && r.params.text === "KICKOFF"));
 });
 
 test("a later stage opens a new tab in the existing task space", async () => {
@@ -141,26 +145,16 @@ test("a later stage opens a new tab in the existing task space", async () => {
   };
   const d = new HerdrDispatcher(client, "faktory-fk", { agentKind: "pi", repoCwd: "/repo" });
   // Task already has a space (from the shaping stage).
-  const res = await d.dispatchStage(task({ workspaceId: "ws3", branch: "faktory-fk/3-ship-it" }), "to_execute", "GO");
+  const res = await d.dispatchStage(task({ workspaceId: "ws3", branch: "faktory-fk/3-ship-it" }), "execute", { system: "SYS", kickoff: "GO" });
 
   assert.ok(!requests.some((r) => r.method === "worktree.create"), "space already exists");
   const created = requests.find((r) => r.method === "tab.create")!;
   assert.equal(created.params.workspace_id, "ws3");
-  assert.equal(created.params.label, "to_execute");
+  assert.equal(created.params.label, "execute");
   assert.equal(res.paneId, "ws3:p2");
-  assert.equal(res.agentName, "faktory-fk-t3-to_execute");
+  assert.equal(res.agentName, "faktory-fk-t3-execute");
 });
 
-test("agentStatus maps herdr agent state, and absent when the agent is gone", async () => {
-  handler = (method) => {
-    if (method === "agent.list")
-      return { agents: [{ agent_name: "faktory-fk-t3-to_shape", status: "working" }] };
-    return {};
-  };
-  const d = new HerdrDispatcher(client, "faktory-fk", { agentKind: "pi", repoCwd: "/repo" });
-  assert.equal(await d.agentStatus("faktory-fk-t3-to_shape"), "working");
-  assert.equal(await d.agentStatus("nobody"), "absent");
-});
 
 test("archiving a task closes its herdr space", async () => {
   handler = () => ({});
@@ -168,4 +162,63 @@ test("archiving a task closes its herdr space", async () => {
   await d.archiveTaskSpace(task({ workspaceId: "ws3" }));
   const closed = requests.find((r) => r.method === "workspace.close");
   assert.equal(closed?.params.workspace_id, "ws3");
+});
+
+test("a leftover worktree on disk is reattached when worktree.create fails", async () => {
+  handler = (method) => {
+    switch (method) {
+      case "worktree.create":
+        return { __error: { code: "worktree_create_failed", message: "Preparing worktree (checking out)" } };
+      case "worktree.open":
+        return { workspace: { workspace_id: "ws9" }, root_pane: { pane_id: "ws9:p1" } };
+      case "pane.get":
+        return { pane: { pane_id: "ws9:p1", tab_id: "ws9:t1" } };
+      case "pane.process_info":
+        return { process_info: { shell_pid: 1, foreground_processes: [{ pid: 1 }] } };
+      default:
+        return {};
+    }
+  };
+  const d = new HerdrDispatcher(client, "faktory-fk", { agentKind: "pi", repoCwd: "/repo" });
+  const res = await d.dispatchStage(task(), "shape", { system: "S", kickoff: "K" });
+  assert.equal(res.workspaceId, "ws9", "reattached to the existing worktree");
+  const open = requests.find((r) => r.method === "worktree.open")!;
+  assert.equal(open.params.branch, "faktory-fk/3-ship-it");
+});
+
+test("a task with a recorded branch reattaches its worktree without trying create", async () => {
+  handler = (method) => {
+    switch (method) {
+      case "worktree.open":
+        return { workspace: { workspace_id: "ws9" }, root_pane: { pane_id: "ws9:p1" } };
+      case "pane.get":
+        return { pane: { pane_id: "ws9:p1", tab_id: "ws9:t1" } };
+      case "pane.process_info":
+        return { process_info: { shell_pid: 1, foreground_processes: [{ pid: 1 }] } };
+      default:
+        return {};
+    }
+  };
+  const d = new HerdrDispatcher(client, "faktory-fk", { agentKind: "pi", repoCwd: "/repo" });
+  const res = await d.dispatchStage(task({ branch: "faktory-fk/3-ship-it" }), "shape", { system: "S", kickoff: "K" });
+  assert.equal(res.workspaceId, "ws9");
+  assert.ok(!requests.some((r) => r.method === "worktree.create"), "reattach comes first for a known branch");
+});
+
+test("when both create and reattach fail, the create error is the one raised", async () => {
+  handler = (method) => {
+    switch (method) {
+      case "worktree.create":
+        return { __error: { code: "worktree_create_failed", message: "Preparing worktree (checking out)" } };
+      case "worktree.open":
+        return { __error: { code: "not_found", message: "no such worktree" } };
+      default:
+        return {};
+    }
+  };
+  const d = new HerdrDispatcher(client, "faktory-fk", { agentKind: "pi", repoCwd: "/repo" });
+  await assert.rejects(
+    () => d.dispatchStage(task(), "shape", { system: "S", kickoff: "K" }),
+    /worktree_create_failed/,
+  );
 });

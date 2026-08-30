@@ -1,22 +1,23 @@
 /**
- * Handoff trail — the pure, source-independent representation of a note the
- * Faktory loop leaves on a work unit. It renders to a self-describing marker
- * that carries structured data-attributes and a human-readable body, e.g.:
+ * Handoff papertrail — the pure, source-independent representation of one
+ * lane-to-lane handoff on a work unit. It renders to a self-describing marker
+ * with the routing as attributes and a human-readable body, e.g.:
  *
- *   <faktory agent="pi" status="running" iteration="2">Plan approved, executing.</faktory>
+ *   <handoff from="review" to="execute" agent="pi">Blocker: missing tests.</handoff>
  *
- * The marker is provider-agnostic: adapters (WorkSource.comment) post the
- * rendered string verbatim (a Notion comment, a GitHub issue comment, …). This
- * module never touches I/O — formatting is a domain concern.
+ * Adapters (WorkSource.comment) post the rendered string verbatim (a Notion
+ * comment, a GitHub issue comment, …), so the task accumulates a feed of
+ * handoffs — the papertrail. This module never touches I/O — formatting is a
+ * domain concern.
  */
 
 export type HandoffValue = string | number | boolean;
 
 export interface Handoff {
-  /** Agent that produced the handoff (e.g. "pi", "reviewer"). */
-  agent?: string | null;
-  /** Loop/agent status at this point (e.g. "running", "review-passed"). */
-  status?: string | null;
+  /** Lane (or phase) the task is leaving. */
+  from?: string | null;
+  /** Lane (or phase) the task is routed to; absent for an in-place note. */
+  to?: string | null;
   /** Human-readable body of the comment. */
   note?: string | null;
   /** Extra data-attributes rendered on the marker, in insertion order. */
@@ -24,7 +25,7 @@ export interface Handoff {
 }
 
 /** The element name used for the handoff marker. */
-export const HANDOFF_TAG = "faktory";
+export const HANDOFF_TAG = "handoff";
 
 function escapeAttr(value: string): string {
   return value
@@ -44,20 +45,20 @@ function isValidAttrName(name: string): boolean {
 }
 
 /**
- * Render a handoff into its marker string. `agent` and `status` come first (when
+ * Render a handoff into its marker string. `from` and `to` come first (when
  * present); remaining `data` entries follow in insertion order, skipping
  * null/undefined. All values are escaped so the marker is always well-formed.
  */
 export function renderHandoff(h: Handoff): string {
   const attrs: Array<[string, HandoffValue]> = [];
-  if (h.agent != null && h.agent !== "") attrs.push(["agent", h.agent]);
-  if (h.status != null && h.status !== "") attrs.push(["status", h.status]);
+  if (h.from != null && h.from !== "") attrs.push(["from", h.from]);
+  if (h.to != null && h.to !== "") attrs.push(["to", h.to]);
   for (const [name, value] of Object.entries(h.data ?? {})) {
     if (value == null) continue;
     if (!isValidAttrName(name)) {
       throw new Error(`invalid handoff data-attribute name ${JSON.stringify(name)}`);
     }
-    if (name === "agent" || name === "status") continue; // top-level fields win
+    if (name === "from" || name === "to") continue; // top-level fields win
     attrs.push([name, value]);
   }
   const rendered = attrs.map(([n, v]) => `${n}="${escapeAttr(String(v))}"`).join(" ");

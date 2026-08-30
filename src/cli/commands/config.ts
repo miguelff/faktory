@@ -2,11 +2,11 @@ import { Command } from "commander";
 import { getConfig, setConfig } from "../../core/db.ts";
 import { createPrompter, runSetup } from "../../setup.ts";
 import {
+  deleteConfig,
   describeConfig,
   instanceRef,
   isYes,
   listInstances,
-  removeInstance,
   requireInstance,
 } from "../context.ts";
 import { Option } from "commander";
@@ -17,10 +17,18 @@ import { selectedConfig, withConfigOption } from "../options.ts";
  * ~/.faktory/<slug>/). CRUD over the set of configs — `list`, `create`,
  * `delete` — and key/value settings inside one — `get`, `set`. This replaces
  * the old colon-namespaced `config:get` / `config:set` for a single, discoverable
- * verb space.
+ * verb space. The old top-level `setup` survives as a hidden, deprecated alias
+ * of `config new` so existing scripts keep working.
  */
 export function registerConfig(program: Command): void {
   const config = program.command("config").description("manage configs (named orchestrations) and their settings");
+
+  program
+    .command("setup", { hidden: true })
+    .description("deprecated alias of `config new`")
+    .action(async () => {
+      await runSetup();
+    });
 
   config
     .command("list")
@@ -29,7 +37,7 @@ export function registerConfig(program: Command): void {
     .action(() => {
       const configs = listInstances();
       if (!configs.length) {
-        console.log("no configs yet \u2014 run faktory config create (or faktory setup)");
+        console.log("no configs yet \u2014 run faktory config new");
         return;
       }
       for (const slug of configs) console.log(describeConfig(slug));
@@ -59,7 +67,9 @@ export function registerConfig(program: Command): void {
         const ui = createPrompter();
         let ok = false;
         try {
-          console.log(`Stop any running serve for "${ref.slug}" before deleting \u2014 this removes its SQLite DB and secrets.`);
+          console.log(
+            `Deleting "${ref.slug}" stops its herdr session (serve, board, agents) and removes its SQLite DB and secrets.`,
+          );
           ok = isYes(await ui.ask(`Delete config "${ref.slug}" and all its local state in ${ref.dir}? (y/n)`, "n"));
         } finally {
           ui.close();
@@ -69,7 +79,7 @@ export function registerConfig(program: Command): void {
           return;
         }
       }
-      removeInstance(ref.slug);
+      deleteConfig(ref.slug);
       console.log(`deleted config "${ref.slug}" (${ref.dir})`);
       console.log("note: Notion ownership tags on already-claimed items are left as-is");
     });
@@ -87,7 +97,7 @@ export function registerConfig(program: Command): void {
   withConfigOption(config.command("set <key> <value>").description("persist a config setting"))
     .addHelpText(
       "after",
-      "\nKeys: repoCwd, agentKind, port, herdrSession, wip (actionable-lane WIP target)",
+      "\nKeys: repoCwd, agentKind, port, herdrSession",
     )
     .action((key: string, value: string, opts) => {
       const { db } = requireInstance(selectedConfig(opts));

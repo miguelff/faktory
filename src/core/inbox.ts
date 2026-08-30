@@ -1,5 +1,5 @@
 import type { DatabaseSync } from "node:sqlite";
-import type { InboxMessage, InboxType, Stage } from "./types.ts";
+import type { InboxMessage, InboxType, Role } from "./types.ts";
 
 /**
  * The inbox is the one channel agents use to talk back to the loop
@@ -8,7 +8,7 @@ import type { InboxMessage, InboxType, Stage } from "./types.ts";
  * serially applies the resulting mutation. This store is pure persistence —
  * validation and transition live in the loop (see core/loop.ts).
  */
-export const INBOX_TYPES: readonly InboxType[] = ["completed", "needs_human", "note"];
+export const INBOX_TYPES: readonly InboxType[] = ["handoff", "note"];
 
 export function isInboxType(v: unknown): v is InboxType {
   return typeof v === "string" && (INBOX_TYPES as readonly string[]).includes(v);
@@ -17,7 +17,7 @@ export function isInboxType(v: unknown): v is InboxType {
 export interface InboxDraft {
   taskId: number;
   type: InboxType;
-  stage?: Stage | null;
+  stage?: Role | null;
   sender?: string | null;
   note?: string | null;
   data?: Record<string, unknown> | null;
@@ -27,7 +27,7 @@ function rowToMessage(r: Record<string, unknown>): InboxMessage {
   return {
     id: r.id as number,
     taskId: r.task_id as number,
-    stage: (r.stage as Stage | null) ?? null,
+    stage: (r.stage as Role | null) ?? null,
     type: r.type as InboxType,
     sender: (r.sender as string | null) ?? null,
     note: (r.note as string | null) ?? null,

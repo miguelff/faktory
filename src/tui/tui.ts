@@ -1,5 +1,7 @@
 import { emitKeypressEvents } from "node:readline";
+import { execFile } from "node:child_process";
 import type { Engine } from "../core/engine.ts";
+import { HerdrClient } from "../herdr/client.ts";
 import { TRANSITIONS, isStage, isWorking } from "../core/lifecycle.ts";
 import { PHASES, type FeedEntry, type Phase, type Task } from "../core/types.ts";
 
@@ -34,10 +36,10 @@ const C = {
 
 const PHASE_COLOR: Record<Phase, (s: string) => string> = {
   backlog: C.dim,
-  to_shape: C.info,
-  to_execute: C.warn,
-  to_review: C.info,
-  ready: C.ok,
+  shape: C.info,
+  execute: C.warn,
+  review: C.info,
+  release: C.ok,
   done: C.ok,
   blocked: C.err,
   archived: C.dim,
@@ -45,10 +47,10 @@ const PHASE_COLOR: Record<Phase, (s: string) => string> = {
 
 const PHASE_LABEL: Record<Phase, string> = {
   backlog: "Backlog",
-  to_shape: "To shape",
-  to_execute: "To execute",
-  to_review: "To review",
-  ready: "Ready",
+  shape: "Shape",
+  execute: "Execute",
+  review: "Review",
+  release: "Release",
   done: "Done",
   blocked: "Blocked",
   archived: "Archived",
@@ -167,6 +169,9 @@ export class Tui {
         if (key.name === "return" && this.selected()) this.mode = "detail";
         if (key.name === "t" && this.selected()) this.mode = "transition";
         if (key.name === "u" && this.selected()) return this.unblock();
+        if (key.name === "x" && this.selected()) return this.unclaim();
+        if (key.name === "o" && this.selected()) return this.openUrl();
+        if (key.name === "w" && this.selected()) return this.gotoSession();
         if (key.name === "s") return this.sync();
         if (key.name === "r") this.refresh("Reloaded");
         this.clampCursor();
@@ -175,6 +180,9 @@ export class Tui {
         if (key.name === "q" || key.name === "escape") this.mode = "board";
         if (key.name === "t") this.mode = "transition";
         if (key.name === "u") return this.unblock();
+        if (key.name === "x") return this.unclaim();
+        if (key.name === "o") return this.openUrl();
+        if (key.name === "w") return this.gotoSession();
         break;
       case "transition": {
         if (key.name === "q" || key.name === "escape") {
@@ -187,8 +195,8 @@ export class Tui {
         const idx = Number(key.sequence) - 1;
         if (idx >= 0 && idx < legal.length) await this.transitionTo(task, legal[idx]!, false);
         // Force-repair to ANY phase via an unambiguous letter map (A..H →
-        // PHASES order). First-letter matching can't work: to_shape/to_execute/
-        // to_review all start with "t".
+        // PHASES order). First-letter matching can't work: backlog/blocked
+        // and release/review collide.
         if (key.sequence && /^[A-H]$/.test(key.sequence)) {
           const phase = PHASES[key.sequence.charCodeAt(0) - 65];
           if (phase) await this.transitionTo(task, phase, true);
@@ -240,17 +248,64 @@ export class Tui {
     this.render();
   }
 
-  /** Unblock a blocked task back to the lane it came from (consumes resumePhase). */
+  /** Unblock a blocked task back to the lane it came from (read from the audit trail). */
   private async unblock(): Promise<void> {
     const task = this.selected();
     if (!task || task.phase !== "blocked") {
       this.message = "only a blocked task can be unblocked";
       return this.render();
     }
-    const to = task.resumePhase ?? "backlog";
+    const to = this.engine.tasks.events(task.id).findLast((e) => e.to === "blocked")?.from ?? "backlog";
     await this.withSpinner(`#${task.id} unblock → ${to}`, async () => {
       await this.engine.transition(task.id, to, "tui", "unblocked");
       this.refresh(`#${task.id} unblocked → ${to}`);
+    });
+    this.render();
+  }
+
+  /**
+   * Release the claim on a backlog task: the entry becomes discoverable to
+   * every instance again. Deliberately a human act from the board — returning
+   * a task to backlog (shape rejection, unblock) never releases automatically.
+   */
+  private async unclaim(): Promise<void> {
+    const task = this.selected();
+    if (!task || task.phase !== "backlog") {
+      this.message = "only a backlog task can be unclaimed";
+      return this.render();
+    }
+    await this.withSpinner(`#${task.id} release claim`, async () => {
+      await this.engine.unclaim(task.id);
+      this.refresh(`#${task.id} claim released — discoverable to every instance again`);
+    });
+    this.render();
+  }
+
+  /** Open the selected task's datasource item in the browser. */
+  private openUrl(): void {
+    const task = this.selected();
+    if (!task) return;
+    execFile(process.platform === "darwin" ? "open" : "xdg-open", [task.url], () => {});
+    this.message = `opened ${task.url}`;
+    this.render();
+  }
+
+  /** Jump to the selected task's herdr session: focus its workspace + tab. */
+  private async gotoSession(): Promise<void> {
+    const task = this.selected();
+    if (!task) return;
+    if (!task.workspaceId) {
+      this.message = "no herdr session for this task yet";
+      return this.render();
+    }
+    await this.withSpinner(`#${task.id} → herdr session`, async () => {
+      const herdr = HerdrClient.fromEnv();
+      await herdr.request("workspace.focus", { workspace_id: task.workspaceId });
+      if (task.paneId) {
+        const info = ((await herdr.request<any>("pane.get", { pane_id: task.paneId })) as any)?.pane ?? {};
+        if (info.tab_id) await herdr.request("tab.focus", { tab_id: info.tab_id });
+      }
+      this.message = `focused ${task.workspaceId} (${task.stage ?? task.phase})`;
     });
     this.render();
   }
@@ -311,7 +366,7 @@ export class Tui {
     for (const e of this.feed) lines.push("  " + this.feedLine(e, cols - 4));
     for (let i = this.feed.length; i < FEED_LINES; i++) lines.push("");
     lines.push(
-      C.dim(" h/l column · j/k card · enter detail · t transition · u unblock · s sync · d done · a archived · q quit"),
+      C.dim(" h/l column · j/k card · enter detail · t transition · u unblock · x unclaim · w session · o url · s sync · d done · a archived · q quit"),
     );
   }
 
@@ -371,12 +426,11 @@ export class Tui {
     lines.push(`   priority  ${t.priority ?? "—"}`);
     lines.push(`   herdr     ${t.workspaceId ?? "—"} / ${t.paneId ?? "—"} / ${t.agentName ?? "—"}`);
     lines.push(`   branch    ${t.branch ?? "—"}    pr ${t.prUrl ?? "—"}`);
-    if (t.resumePhase) lines.push(`   resume    ${C.dim(PHASE_LABEL[t.resumePhase] ?? t.resumePhase)}`);
     if (t.error) lines.push(`   error     ${C.err(truncate(t.error, cols - 14))}`);
     lines.push("");
     lines.push(C.bold("   inbox"));
     for (const m of this.engine.inbox.forTask(t.id).slice(-5)) {
-      const tone = m.type === "needs_human" ? C.err : m.type === "completed" ? C.ok : C.dim;
+      const tone = m.type === "handoff" ? C.ok : C.dim;
       lines.push(C.dim(`   ${m.createdAt.slice(11, 19)} `) + tone(`${m.type}`) + C.dim(` ${truncate(m.note ?? "", cols - 30)}`));
     }
     lines.push("");
@@ -398,7 +452,8 @@ export class Tui {
       lines.push(C.dim("   esc back"));
     } else {
       const unblock = t.phase === "blocked" ? " · u unblock" : "";
-      lines.push(C.dim(` t transition${unblock} · esc back · q board`));
+      const unclaim = t.phase === "backlog" ? " · x unclaim" : "";
+      lines.push(C.dim(` t transition${unblock}${unclaim} · w session · o url · esc back · q board`));
     }
   }
 }

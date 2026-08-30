@@ -118,6 +118,53 @@ const MIGRATIONS: string[] = [
   );
   CREATE INDEX idx_feed_at ON feed(id DESC);
   `,
+  // Migration 3: phase renames — drop the to_ prefix on the lanes
+  // (to_shape/to_execute/to_review → shape/execute/review) and rename
+  // ready → release, everywhere a phase or stage is stored.
+  `
+  UPDATE tasks SET phase = substr(phase, 4) WHERE phase IN ('to_shape','to_execute','to_review');
+  UPDATE tasks SET stage = substr(stage, 4) WHERE stage IN ('to_shape','to_execute','to_review');
+  UPDATE tasks SET resume_phase = substr(resume_phase, 4) WHERE resume_phase IN ('to_shape','to_execute','to_review');
+  UPDATE task_stages SET stage = substr(stage, 4) WHERE stage IN ('to_shape','to_execute','to_review');
+  UPDATE inbox SET stage = substr(stage, 4) WHERE stage IN ('to_shape','to_execute','to_review');
+  UPDATE task_events SET "from" = substr("from", 4) WHERE "from" IN ('to_shape','to_execute','to_review');
+  UPDATE task_events SET "to" = substr("to", 4) WHERE "to" IN ('to_shape','to_execute','to_review');
+
+  UPDATE tasks SET phase = 'release' WHERE phase = 'ready';
+  UPDATE tasks SET resume_phase = 'release' WHERE resume_phase = 'ready';
+  UPDATE task_events SET "from" = 'release' WHERE "from" = 'ready';
+  UPDATE task_events SET "to" = 'release' WHERE "to" = 'ready';
+  `,
+  // Migration 4: the inbox collapses to handoff + note. Pending needs_human
+  // messages become handoffs to blocked, pending completed messages handoffs
+  // to their lane's next phase, so the loop can still apply them; applied
+  // history keeps its original type as a faithful record. resume_phase is
+  // gone — the unblocking session reads its context from the audit trail.
+  `
+  UPDATE inbox SET type = 'handoff', data = json_set(COALESCE(data, '{}'), '$.to', 'blocked')
+  WHERE type = 'needs_human' AND applied_at IS NULL;
+
+  UPDATE inbox SET type = 'handoff', data = json_set(COALESCE(data, '{}'), '$.to', CASE stage
+    WHEN 'shape'   THEN 'execute'
+    WHEN 'execute' THEN 'review'
+    WHEN 'review'  THEN 'release'
+    WHEN 'release' THEN 'done'
+  END)
+  WHERE type = 'completed' AND applied_at IS NULL AND stage IN ('shape','execute','review','release');
+
+  ALTER TABLE tasks DROP COLUMN resume_phase;
+  `,
+  // Migration 5: the "your turn" flag — an interactive agent declares it is
+  // waiting on the human (note with data.awaiting = "human"); the loop clears
+  // it as soon as the agent works or reports again.
+  `
+  ALTER TABLE tasks ADD COLUMN attention_at TEXT;
+  `,
+  // Migration 6: attention_at is gone — herdr itself surfaces an agent that is
+  // asking for input, so the loop keeps no "your turn" state.
+  `
+  ALTER TABLE tasks DROP COLUMN attention_at;
+  `,
 ];
 
 export function openDb(path: string): DatabaseSync {

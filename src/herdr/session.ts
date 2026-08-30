@@ -74,6 +74,24 @@ export function sessionClient(name: string): Promise<HerdrClient | undefined> {
   return liveClient(sessionSocketPath(name));
 }
 
+/**
+ * Stop and delete the named session. Stopping the session's server tears down
+ * every pane it hosts, killing the processes that depend on it (the serve
+ * loop, the board TUI, any stage agents). Returns false when no such session
+ * exists (or the herdr binary is unavailable) — a no-op, not an error.
+ */
+export function destroySession(name: string): boolean {
+  if (!existsSync(join(homedir(), ".config", "herdr", "sessions", name))) return false;
+  const run = (args: string[]) => spawnSync("herdr", args, { stdio: "ignore" });
+  try {
+    run(["session", "stop", name]);
+    run(["session", "delete", name]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Wait for the named session's server to come up (someone else is starting it). */
 export async function waitForSession(name: string, timeoutMs = 60_000): Promise<HerdrClient> {
   const deadline = Date.now() + timeoutMs;

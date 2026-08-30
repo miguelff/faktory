@@ -3,7 +3,7 @@
 Local orchestration for coding agents. Faktory watches an issue backlog
 (Notion today; Jira/GitHub behind the same abstraction) and runs a
 **deterministic engine loop** that moves each task through a pipeline
-(Backlog → To shape → To execute → To review → Ready → Done), dispatching a
+(Backlog → Shape → Execute → Review → Release → Done), dispatching a
 coding agent inside [herdr](https://herdr.dev) per stage. Agents do the work and
 report back through a validated **inbox** (channel-style); the loop owns every
 state transition, lock, and source annotation. Progress is mirrored back to the
@@ -34,7 +34,7 @@ Notion (OAuth in the browser when
 `FAKTORY_NOTION_CLIENT_ID`/`FAKTORY_NOTION_CLIENT_SECRET` are set, otherwise an
 integration token), then pick the backlog database **or let faktory create
 one**, then repo/harness/port defaults. Re-run the wizard any time with
-`bin/faktory setup`.
+`bin/faktory config new`.
 
 Scripted setup is still available:
 
@@ -62,11 +62,10 @@ with `config get`/`config set`:
 ```sh
 bin/faktory config set repoCwd /path/to/repo --config omnia  # where task worktrees are cut
 bin/faktory config set agentKind pi          --config omnia  # harness stage agents run as
-bin/faktory config set wip 3                 --config omnia  # tasks kept in the actionable lanes
 bin/faktory config get                       --config omnia  # print all settings
 ```
 
-Keys: `repoCwd`, `agentKind`, `port`, `herdrSession`, `wip` (actionable-lane WIP target, default 3).
+Keys: `repoCwd`, `agentKind`, `port`, `herdrSession`.
 
 ## Collaborate
 
@@ -129,6 +128,8 @@ Other commands:
 ```sh
 bin/faktory task sync --config omnia          # pull candidates into the task table
 bin/faktory task list --config omnia          # list tasks (alias: task ls)
+bin/faktory task show 7 --config omnia        # one task: state, legal handoffs, papertrail
+bin/faktory task show 7 --json --config omnia # full detail from the source: { title, body, trail, meta }
 bin/faktory tui       --config omnia          # inspect / repair in the terminal
 bin/faktory invite omnia                     # share this config's datasource
 bin/faktory join   <string>                  # link a new config to a shared datasource
@@ -143,19 +144,25 @@ bin/faktory config delete omnia              # delete a config + its local state
 bin/faktory config delete omnia --force      # …without the confirmation prompt
 ```
 
-Deleting a config removes its state under `~/.faktory/<slug>/` (SQLite DB and
-secrets); it leaves Notion ownership tags on already-claimed items untouched.
+Deleting a config first tears down its herdr session — stopping the session's
+server kills everything running in it (the serve loop, the board, any stage
+agents) — then removes its state under `~/.faktory/<slug>/` (SQLite DB and
+secrets). Notion ownership tags on already-claimed items are left untouched.
 The `serve` picker can also delete a config when several exist.
 
 - **Notion** is the remote board: `faktory_status` mirrors every phase.
 - **HTTP API**: `docs/API.md` — thin board/feed + the inbox agents report to.
-- **TUI kanban**: h/l move between columns, j/k between cards, enter for detail
-  + audit/inbox history, `t` to transition, SHIFT+letter to force-repair, `d`
-  toggle Done, `a` toggle Archived, `s` sync, `q` quit. Cards show `●` working
-  / `○` waiting.
+- **TUI kanban**: cards show `●` working / `○` waiting (jump into a task's
+  session with `w`, open its datasource item with `o`). h/l move between columns, j/k between cards, enter for detail +
+  audit/inbox history, `t` to transition, SHIFT+letter to force-repair, `u`
+  unblock, `x` release a backlog task's claim, `d` toggle Done, `a` toggle
+  Archived, `s` sync, `q` quit.
 - **Dispatch** requires running inside herdr (`HERDR_SOCKET_PATH` set): the loop
   gives each task its own herdr space (`faktory-<slug>/<task>-<title>` branch),
-  a tab per pipeline stage, and prompts each stage agent with its stage prompt.
+  a tab per pipeline stage, and starts each stage agent with its role's
+  standing orders as an appended **system prompt** (pi/claude
+  `--append-system-prompt`; other harnesses get them prepended to the kickoff
+  message) plus the task + papertrail as the first message.
 
 ## CLI
 
@@ -191,13 +198,20 @@ in `src/cli/index.ts` (see `AGENTS.md` → "CLI structure").
 ## Lifecycle
 
 ```
-backlog → to_shape → to_execute → to_review → ready → done
-            ↘ blocked (needs a human; resumes its lane)   ↘ archived
+backlog → shape → execute → review → release → done
+            ↘ blocked (opens an unblocking session; resumes its lane)
 ```
 
-The three **actionable lanes** (`to_shape`, `to_execute`, `to_review`) are the
+Only a human moves a task out of `backlog` (and from `done` to `archived`).
+The four **actionable lanes** (`shape`, `execute`, `review`, `release`) are the
 loop's inboxes; a task in a lane is either being worked by a stage agent or
-waiting for the loop to dispatch one. The loop keeps the lanes fed up to `wip`.
+waiting for the loop to dispatch one. Shaping is an interactive session that
+ends — on the human's word in the agent's chat — back in `backlog` or on to
+`execute`, and never blocks. Agents route a task to another lane with a
+`handoff` inbox message; every handoff is mirrored to the source as a
+`<handoff from to>` comment — the task's papertrail. A `blocked` task gets an
+interactive unblocking session that explains why it is blocked and resumes the
+task where the human says.
 
 Every transition is validated against the state machine and recorded in the
 `task_events` audit log. Illegal jumps are rejected; repairs are possible but

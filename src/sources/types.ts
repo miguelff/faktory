@@ -1,4 +1,4 @@
-import type { WorkItem } from "../core/types.ts";
+import type { WorkItem, WorkItemDetails } from "../core/types.ts";
 
 /**
  * The WorkSource port. Faktory's engine only ever talks to this interface;
@@ -20,11 +20,24 @@ export interface WorkSource {
   getItem(itemId: string): Promise<WorkItem | null>;
 
   /**
+   * Full detail of one item: title, body as markdown, the comment trail
+   * (oldest first), and source-native meta properties. Backs
+   * `faktory task show <id> --json`, the way agents read their task.
+   */
+  details(itemId: string): Promise<WorkItemDetails>;
+
+  /**
    * Claim ownership of an item (CAS): stamp faktory_owned_by/_owned_at only
    * if it is still unowned. Resolves to the winning owner — equal to this
    * instance's prefix on success, another prefix when the claim was lost.
    */
   claim(itemId: string): Promise<string>;
+
+  /**
+   * Release ownership of an item this instance owns: clear
+   * faktory_owned_by/_owned_at so it is discoverable to every instance again.
+   */
+  unclaim(itemId: string): Promise<void>;
 
   /** Write faktory_status back to the source. Only for items this instance owns. */
   setStatus(itemId: string, status: string): Promise<void>;

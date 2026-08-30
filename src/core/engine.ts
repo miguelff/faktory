@@ -131,17 +131,31 @@ export class Engine {
   }
 
   /**
-   * Leave a handoff-trail comment on a task's work unit. Missing `agent` and
-   * `status` default to the task's agent name and mirrored phase status, so the
-   * loop can pass just a note. Returns the rendered marker that was posted.
+   * Leave a papertrail comment on a task's work unit: a `<handoff from to>`
+   * marker. A missing `from` defaults to the task's current role (or phase), so
+   * callers can pass just the routing and a note. Returns the rendered marker.
    */
+  /**
+   * Release the claim on a backlog task: clear faktory_owned_by/_owned_at in
+   * the datasource so the entry is discoverable to every instance again. Only
+   * legal from `backlog` — a mid-pipeline task is managed by its owner. This
+   * is a deliberate human act (TUI/API); transitions back to backlog never
+   * release automatically.
+   */
+  async unclaim(taskId: number): Promise<void> {
+    const task = this.tasks.byId(taskId);
+    if (!task) throw new Error(`task ${taskId} not found`);
+    if (task.phase !== "backlog") throw new Error(`only a backlog task can be unclaimed (task ${taskId} is in ${task.phase})`);
+    await this.source.unclaim(task.itemId);
+    this.feed.append({ taskId, kind: "transition", actor: "human", message: "claim released — discoverable again" });
+  }
+
   async comment(taskId: number, handoff: Handoff): Promise<string> {
     const task = this.tasks.byId(taskId);
     if (!task) throw new Error(`task ${taskId} not found`);
     const body = renderHandoff({
       ...handoff,
-      agent: handoff.agent ?? task.agentName,
-      status: handoff.status ?? statusForPhase(task.phase),
+      from: handoff.from ?? task.stage ?? task.phase,
     });
     await this.source.comment(task.itemId, body);
     return body;

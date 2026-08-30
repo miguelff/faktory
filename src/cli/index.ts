@@ -1,6 +1,5 @@
 import { Command } from "commander";
 import { registerServe } from "./commands/serve.ts";
-import { registerSetup } from "./commands/setup.ts";
 import { registerConfig } from "./commands/config.ts";
 import { registerSource } from "./commands/source.ts";
 import { registerTask } from "./commands/task.ts";
@@ -30,7 +29,6 @@ export function buildProgram(): Command {
 
   const registrars = [
     registerServe,
-    registerSetup,
     registerConfig,
     registerSource,
     registerTask,
