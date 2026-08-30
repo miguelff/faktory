@@ -536,3 +536,25 @@ test("reconcile flags a datasource/local mismatch and sweeps it once repaired", 
   await engine.reconcile();
   assert.equal(engine.errors.openByKind("reconcile").length, 0, "the resolved inconsistency is swept");
 });
+
+test("reconcile ignores a pass where a write raced the datasource read", async () => {
+  const h = harness();
+  const { engine, source } = h;
+  await seedInShape(h, [item("n1", "One", 5)]);
+  // A write is acknowledged DURING reconcile's datasource read: the local
+  // snapshot advances to `execute` while the fetched candidates still show
+  // `shape`. Reconcile must not flag that stale-vs-fresh comparison.
+  const realList = source.listCandidates.bind(source);
+  source.listCandidates = async () => {
+    const items = await realList(); // snapshot taken while status is still 'shape'
+    await engine.transition(1, "execute", "loop"); // acked write moves local + remote
+    return items; // deliberately stale
+  };
+  assert.deepEqual(await engine.reconcile(), [], "no false positive from the raced write");
+  assert.equal(engine.errors.openByKind("reconcile").length, 0);
+
+  // A subsequent quiescent pass sees a consistent state and stays clean.
+  source.listCandidates = realList;
+  assert.deepEqual(await engine.reconcile(), []);
+  assert.equal(engine.errors.openByKind("reconcile").length, 0);
+});

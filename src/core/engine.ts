@@ -49,6 +49,13 @@ export class Engine {
   readonly feed: FeedStore;
   readonly errors: ErrorStore;
   readonly outbox: OutboxStore;
+  /**
+   * Monotonic count of acknowledged local projections. Reconcile snapshots it
+   * across the datasource read to detect a write that raced the read (the API
+   * server can apply one during the network await), so it never compares a
+   * fresh local snapshot against a stale remote one.
+   */
+  private writeSeq = 0;
 
   constructor(
     db: DatabaseSync,
@@ -250,6 +257,7 @@ export class Engine {
 
   /** The local half: project the acknowledged write onto the snapshot. */
   private applyLocal(op: OutboxOp, outcome: { claimLost?: string }): void {
+    this.writeSeq++;
     switch (op.kind) {
       case "transition": {
         if (outcome.claimLost) {
@@ -306,12 +314,17 @@ export class Engine {
    * swept resolved. Never mutates task state — only flags.
    */
   async reconcile(): Promise<ErrorEntry[]> {
+    const seqBefore = this.writeSeq;
     let items;
     try {
       items = await this.source.listCandidates();
     } catch {
       return []; // datasource unreachable — write-through retries own recovery
     }
+    // A write acknowledged during the read moved the local snapshot ahead of
+    // the `items` we just fetched: comparing them would be a false positive.
+    // Skip this pass; the next tick audits a quiescent, consistent state.
+    if (this.writeSeq !== seqBefore) return [];
     const byItem = new Map(items.map((i) => [i.id, i]));
     const flagged: ErrorEntry[] = [];
     const seen = new Set<string>();
