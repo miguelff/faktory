@@ -1,6 +1,6 @@
 import type { Engine } from "./engine.ts";
 import { canHandoff, isWorking, roleFor } from "./lifecycle.ts";
-import { rolePrompt } from "./stages.ts";
+import { rolePrompts, type RolePrompts } from "./stages.ts";
 import type { InboxMessage, Phase, Role, Task } from "./types.ts";
 import { PHASES } from "./types.ts";
 
@@ -32,8 +32,12 @@ export interface StageDispatchResult {
 export interface Dispatcher {
   /** Deterministic name of the agent that runs `role` of a task. */
   agentNameFor(taskId: number, role: Role): string;
-  /** Provision the task space + role tab, start the agent, prompt it. */
-  dispatchStage(task: Task, role: Role, prompt: string): Promise<StageDispatchResult>;
+  /**
+   * Provision the task space + role tab, start the agent with `prompts.system`
+   * as its system prompt (where the harness supports one), and send
+   * `prompts.kickoff` as the first message.
+   */
+  dispatchStage(task: Task, role: Role, prompts: RolePrompts): Promise<StageDispatchResult>;
   /** Close the task's herdr space (used on archive). */
   archiveTaskSpace(task: Task): Promise<void>;
 }
@@ -203,7 +207,7 @@ export class Loop {
     // transition that moved the task into blocked carries the reason (its
     // note) and the lane it left (its `from`).
     const blocking = role === "unblock" ? this.engine.tasks.events(task.id).findLast((e) => e.to === "blocked") : undefined;
-    const prompt = rolePrompt(role, {
+    const prompts = rolePrompts(role, {
       task,
       handoff,
       reason: blocking?.note ?? null,
@@ -211,7 +215,7 @@ export class Loop {
       reportCommand: this.cfg.reportCommandFor(task, role, agentName),
     });
     try {
-      const result = await this.dispatcher.dispatchStage(task, role, prompt);
+      const result = await this.dispatcher.dispatchStage(task, role, prompts);
       this.engine.tasks.update(task.id, {
         workspaceId: result.workspaceId,
         paneId: result.paneId,

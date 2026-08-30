@@ -3,6 +3,7 @@ import { promisify } from "node:util";
 import { setTimeout as sleep } from "node:timers/promises";
 import type { HerdrClient } from "./client.ts";
 import type { Role, Task } from "../core/types.ts";
+import type { RolePrompts } from "../core/stages.ts";
 
 const exec = promisify(execFile);
 
@@ -71,17 +72,31 @@ async function waitForIdleShell(herdr: HerdrClient, paneId: string, timeoutMs = 
 }
 
 /** Start an agent, retrying through the transient `agent_pane_busy` window. */
+/**
+ * Harnesses that accept a system prompt on their command line (appended to
+ * their own, so AGENTS.md and the coding baseline stay intact). The role's
+ * standing orders go there — they survive context compaction. Other kinds get
+ * the system text prepended to the kickoff message instead.
+ */
+const SYSTEM_PROMPT_FLAG: Readonly<Record<string, string>> = {
+  pi: "--append-system-prompt",
+  claude: "--append-system-prompt",
+};
+
 async function startAgentWithRetry(
   agentName: string,
   agentKind: string,
   paneId: string,
+  agentArgs: string[],
   timeoutMs = 30_000,
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
+  const args = ["agent", "start", agentName, "--kind", agentKind, "--pane", paneId];
+  if (agentArgs.length) args.push("--", ...agentArgs);
   for (;;) {
     try {
       // The CLI owns interactive readiness detection for agent startup.
-      await exec("herdr", ["agent", "start", agentName, "--kind", agentKind, "--pane", paneId]);
+      await exec("herdr", args);
       return;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -157,7 +172,7 @@ export async function dispatchStage(
   herdr: HerdrClient,
   task: Task,
   stage: Role,
-  prompt: string,
+  prompts: RolePrompts,
   prefix: string,
   opts: DispatchOptions,
 ): Promise<StageDispatch> {
@@ -165,8 +180,10 @@ export async function dispatchStage(
   const paneId = await openStageTab(herdr, workspaceId, stage, opts.repoCwd, rootPaneId);
   const agentName = stageAgentName(prefix, task.id, stage);
   await waitForIdleShell(herdr, paneId);
-  await startAgentWithRetry(agentName, opts.agentKind, paneId);
-  await herdr.request("agent.prompt", { target: agentName, text: prompt });
+  const flag = SYSTEM_PROMPT_FLAG[opts.agentKind];
+  await startAgentWithRetry(agentName, opts.agentKind, paneId, flag ? [flag, prompts.system] : []);
+  const kickoff = flag ? prompts.kickoff : `${prompts.system}\n\n${prompts.kickoff}`;
+  await herdr.request("agent.prompt", { target: agentName, text: kickoff });
   return { workspaceId, paneId, agentName, branch };
 }
 

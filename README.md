@@ -157,7 +157,10 @@ The `serve` picker can also delete a config when several exist.
   Archived, `s` sync, `q` quit.
 - **Dispatch** requires running inside herdr (`HERDR_SOCKET_PATH` set): the loop
   gives each task its own herdr space (`faktory-<slug>/<task>-<title>` branch),
-  a tab per pipeline stage, and prompts each stage agent with its stage prompt.
+  a tab per pipeline stage, and starts each stage agent with its role's
+  standing orders as an appended **system prompt** (pi/claude
+  `--append-system-prompt`; other harnesses get them prepended to the kickoff
+  message) plus the task + papertrail as the first message.
 
 ## CLI
 

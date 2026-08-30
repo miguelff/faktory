@@ -109,7 +109,7 @@ test("first stage creates the task space (worktree) and reuses its root tab", as
     }
   };
   const d = new HerdrDispatcher(client, "faktory-fk", { agentKind: "pi", repoCwd: "/repo" });
-  const res = await d.dispatchStage(task(), "shape", "PROMPT");
+  const res = await d.dispatchStage(task(), "shape", { system: "SYSTEM-ORDERS", kickoff: "KICKOFF" });
 
   assert.equal(res.workspaceId, "ws3");
   assert.equal(res.paneId, "ws3:p1", "first stage reuses the space's root pane");
@@ -123,8 +123,11 @@ test("first stage creates the task space (worktree) and reuses its root tab", as
   assert.ok(!requests.some((r) => r.method === "tab.create"), "first stage reuses the root tab");
 
   const calls = herdrCalls();
-  assert.ok(calls.some((c) => c.includes("agent start faktory-fk-t3-shape")));
-  assert.ok(requests.some((r) => r.method === "agent.prompt" && r.params.text === "PROMPT"));
+  assert.ok(
+    calls.some((c) => c.includes("agent start faktory-fk-t3-shape") && c.includes("--append-system-prompt SYSTEM-ORDERS")),
+    "pi gets the role's standing orders as an appended system prompt",
+  );
+  assert.ok(requests.some((r) => r.method === "agent.prompt" && r.params.text === "KICKOFF"));
 });
 
 test("a later stage opens a new tab in the existing task space", async () => {
@@ -140,7 +143,7 @@ test("a later stage opens a new tab in the existing task space", async () => {
   };
   const d = new HerdrDispatcher(client, "faktory-fk", { agentKind: "pi", repoCwd: "/repo" });
   // Task already has a space (from the shaping stage).
-  const res = await d.dispatchStage(task({ workspaceId: "ws3", branch: "faktory-fk/3-ship-it" }), "execute", "GO");
+  const res = await d.dispatchStage(task({ workspaceId: "ws3", branch: "faktory-fk/3-ship-it" }), "execute", { system: "SYS", kickoff: "GO" });
 
   assert.ok(!requests.some((r) => r.method === "worktree.create"), "space already exists");
   const created = requests.find((r) => r.method === "tab.create")!;

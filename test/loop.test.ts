@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { openDb } from "../src/core/db.ts";
 import { Engine } from "../src/core/engine.ts";
 import { Loop, type Dispatcher, type StageDispatchResult } from "../src/core/loop.ts";
+import type { RolePrompts } from "../src/core/stages.ts";
 import type { InboxType, Role, Task, WorkItem } from "../src/core/types.ts";
 import type { WorkSource } from "../src/sources/types.ts";
 
@@ -39,7 +40,7 @@ class FakeDispatcher implements Dispatcher {
   agentNameFor(taskId: number, role: Role): string {
     return `a-t${taskId}-${role}`;
   }
-  async dispatchStage(task: Task, role: Role, _prompt: string): Promise<StageDispatchResult> {
+  async dispatchStage(task: Task, role: Role, _prompts: RolePrompts): Promise<StageDispatchResult> {
     const agentName = this.agentNameFor(task.id, role);
     this.dispatched.push({ taskId: task.id, stage: role, agentName });
     return { workspaceId: `ws${task.id}`, paneId: `ws${task.id}:p-${role}`, agentName, branch: `b/${task.id}` };

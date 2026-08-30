@@ -1,17 +1,27 @@
 import type { InboxMessage, Role, Task } from "./types.ts";
 
 /**
- * Role prompts — the instructions the loop hands a dispatched agent for each
- * actionable lane (shaping, executing, reviewing, merging) plus the interactive
- * unblocking session it opens on a blocked task. Pure and source-independent:
- * the loop supplies the task, the handoff trail (prior inbox annotations), and
- * the exact `faktory report` command the agent must call to talk back.
+ * Role prompts — what the loop hands a dispatched agent, split in two:
  *
- * Every prompt ends with the same contract: the task moves only on a terminal
- * `handoff` message — never inferred. Sessions are interactive at every stage:
- * agents ask the human directly in their tab (herdr surfaces the question),
- * and the loop never second-guesses a quiet session.
+ * - `system`: the agent's identity and standing orders for its role (who it
+ *   is, how it works, the reporting contract). Task-independent apart from the
+ *   baked-in `faktory report` command; installed as the agent's *system
+ *   prompt* when the harness supports one (pi/claude `--append-system-prompt`),
+ *   so the role survives context compaction and the whole conversation.
+ * - `kickoff`: the first user message — the concrete task, its papertrail so
+ *   far, and (for unblocking) why it is blocked.
+ *
+ * Pure and source-independent. Every contract says the same thing: the task
+ * moves only on a terminal `handoff` message — never inferred. Sessions are
+ * interactive at every stage: agents ask the human directly in their tab
+ * (herdr surfaces the question), and the loop never second-guesses a quiet
+ * session.
  */
+
+export interface RolePrompts {
+  system: string;
+  kickoff: string;
+}
 
 export interface StagePromptInput {
   task: Task;
@@ -59,7 +69,7 @@ function contract(role: Role, reportCommand: string): string {
   const next = NEXT[role];
   return [
     "## Reporting back (required)",
-    "You are a stage worker. You never move the task yourself and never edit the source.",
+    "You never move the task yourself and never edit the source.",
     "Everything you send back goes through the Faktory inbox with this command:",
     "",
     `    ${reportCommand} --type <handoff|note> --note "<summary>" --to <lane> [--data '<json>']`,
@@ -84,142 +94,134 @@ function contract(role: Role, reportCommand: string): string {
   ].join("\n");
 }
 
-function shapePrompt(input: StagePromptInput): string {
-  const { task } = input;
-  return [
-    `# Shape this task`,
-    `Task #${task.id}: ${task.title}`,
-    `Source: ${task.url}`,
-    "",
-    handoffTrail(input.handoff),
-    "",
-    "Run a collaborative shaping process with the human, in this order:",
-    "1. Ingest the raw idea — restate the intent of the task as written.",
-    "2. Ground it in reality — explore the codebase, docs, and the source to",
-    "   understand current behavior, terminology, and constraints.",
-    "3. Grill the human — ask a few targeted questions to resolve ambiguity and",
-    "   challenge scope. Propose defaults instead of open-ended asks.",
-    "4. Draft the shaped issue — context (current vs wanted), the wanted behavior",
-    "   in concrete sections, acceptance criteria as a checklist, pointers to",
-    "   affected code.",
-    "5. Iterate until sign-off — present the draft, incorporate corrections, repeat",
-    "   until the human explicitly agrees.",
-    "",
-    "This is an interactive session: the task moves ONLY when the human tells you",
-    "so in this chat — never on your own judgement.",
-    "- Human signs off → hand off with `--to execute`, the `--note` carrying the",
-    "  shaped spec (context, wanted behavior, acceptance criteria, pointers).",
-    "- Human decides it is not ready → hand off with `--to backlog` and a note",
-    "  recording why.",
-    "",
-    contract("shape", input.reportCommand),
-  ].join("\n");
+/** The concrete task, shared by every kickoff message. */
+function taskHeader(verb: string, task: Task): string[] {
+  return [`# ${verb} task #${task.id}: ${task.title}`, `Source: ${task.url}`, ""];
 }
 
-function executePrompt(input: StagePromptInput): string {
-  const { task } = input;
-  return [
-    `# Execute this task`,
-    `Task #${task.id}: ${task.title}`,
-    `Source: ${task.url}`,
-    "",
-    handoffTrail(input.handoff),
-    "",
-    "You are in a dedicated worktree on this task's branch. Implement the shaped",
-    "spec above:",
-    "- Comply with AGENTS.md (hexagonal boundaries, lifecycle as data, tests as spec).",
-    "- Work in coherent Conventional Commits; write tests with the code.",
-    "- `pnpm typecheck && pnpm test` must pass before you finish.",
-    "- Open (or update) a PR against main when a remote exists; capture the PR URL.",
-    "",
-    "When the implementation is complete and green, hand off with `--to review`,",
-    "a summary of what changed, and `--data '{\"pr\":\"<url>\"}'` when a PR exists.",
-    "If something goes wrong that only a human can resolve, hand off with",
-    "`--to blocked`.",
-    "",
-    contract("execute", input.reportCommand),
-  ].join("\n");
-}
+const SYSTEM: Record<Role, (reportCommand: string) => string> = {
+  shape: (report) =>
+    [
+      "You are a feature/bug shaping agent. Grill the user until you have a spec",
+      "good enough to hand off to a programming agent, in this order:",
+      "1. Ingest the raw idea — restate the intent of the task as written.",
+      "2. Ground it in reality — explore the codebase, docs, and the source to",
+      "   understand current behavior, terminology, and constraints.",
+      "3. Grill the user — ask a few targeted questions to resolve ambiguity and",
+      "   challenge scope. Propose defaults instead of open-ended asks.",
+      "4. Draft the shaped issue — context (current vs wanted), the wanted behavior",
+      "   in concrete sections, acceptance criteria as a checklist, pointers to",
+      "   affected code.",
+      "5. Iterate until sign-off — present the draft, incorporate corrections,",
+      "   repeat until the user explicitly agrees.",
+      "",
+      "The task moves ONLY when the user tells you so in this chat — never on your",
+      "own judgement. Once you and the user have agreed on a spec, hand the work",
+      "off to execution by running:",
+      "",
+      `    ${report} --type handoff --to execute --note "<the agreed spec>"`,
+      "",
+      "If the user decides it is not ready, hand off with `--to backlog` and a",
+      "note recording why.",
+      "",
+      contract("shape", report),
+    ].join("\n"),
 
-function reviewPrompt(input: StagePromptInput): string {
-  const { task } = input;
-  return [
-    `# Blind-review this task`,
-    `Task #${task.id}: ${task.title}`,
-    `Source: ${task.url}`,
-    "",
-    handoffTrail(input.handoff),
-    "",
-    "Review the change with NO access to the execution conversation — only the diff",
-    "(`git diff main...HEAD`), the shaped spec, and the source. Judge correctness,",
-    "edge cases, test coverage, AGENTS.md compliance, and simplicity.",
-    "Collect findings as a numbered list with severity: blocker / should-fix / nit.",
-    "",
-    "- All feedback addressed (only nits remain) → hand off with `--to release`.",
-    "- Blockers or should-fix findings remain → hand off with `--to execute`",
-    "  listing them, so execution picks the task back up.",
-    "- Something is wrong that neither lane can fix → hand off with `--to blocked`",
-    "  describing it.",
-    "",
-    contract("review", input.reportCommand),
-  ].join("\n");
-}
+  execute: (report) =>
+    [
+      "You are an execution agent: you implement a shaped spec in a dedicated",
+      "worktree on the task's branch.",
+      "- Comply with AGENTS.md (hexagonal boundaries, lifecycle as data, tests as spec).",
+      "- Work in coherent Conventional Commits; write tests with the code.",
+      "- `pnpm typecheck && pnpm test` must pass before you finish.",
+      "- Open (or update) a PR against main when a remote exists; capture the PR URL.",
+      "",
+      "When the implementation is complete and green, hand off with `--to review`,",
+      "a summary of what changed, and `--data '{\"pr\":\"<url>\"}'` when a PR exists.",
+      "If something goes wrong that only a human can resolve, hand off with",
+      "`--to blocked`.",
+      "",
+      contract("execute", report),
+    ].join("\n"),
 
-function releasePrompt(input: StagePromptInput): string {
-  const { task } = input;
-  return [
-    `# Merge & release this task`,
-    `Task #${task.id}: ${task.title}`,
-    `Source: ${task.url}`,
-    "",
-    handoffTrail(input.handoff),
-    "",
-    "The review passed. Land the change:",
-    "- Rebase the branch on main if needed and make sure CI is green.",
-    "- Merge the PR (or fast-forward main) following the repo's conventions.",
-    "- Run any release/deploy step the repo defines for a merged change.",
-    "",
-    "When the change is merged (and released where applicable), hand off with",
-    "`--to done` summarizing what landed. If merging is not possible (conflicts",
-    "you cannot resolve, failing CI, missing permissions), hand off with",
-    "`--to blocked` describing exactly what is in the way.",
-    "",
-    contract("release", input.reportCommand),
-  ].join("\n");
-}
+  review: (report) =>
+    [
+      "You are a blind-review agent: you judge a change with NO access to the",
+      "execution conversation — only the diff (`git diff main...HEAD`), the shaped",
+      "spec, and the source. Judge correctness, edge cases, test coverage,",
+      "AGENTS.md compliance, and simplicity.",
+      "Collect findings as a numbered list with severity: blocker / should-fix / nit.",
+      "",
+      "- All feedback addressed (only nits remain) → hand off with `--to release`.",
+      "- Blockers or should-fix findings remain → hand off with `--to execute`",
+      "  listing them, so execution picks the task back up.",
+      "- Something is wrong that neither lane can fix → hand off with `--to blocked`",
+      "  describing it.",
+      "",
+      contract("review", report),
+    ].join("\n"),
 
-function unblockPrompt(input: StagePromptInput): string {
-  const { task } = input;
-  return [
-    `# Unblock this task`,
-    `Task #${task.id}: ${task.title}`,
-    `Source: ${task.url}`,
-    "",
-    `Why it is blocked: ${input.reason ?? "(no reason recorded — check the handoff trail and the feed)"}`,
-    ...(input.cameFrom ? [`Lane it was in: ${input.cameFrom}`] : []),
-    "",
-    handoffTrail(input.handoff),
-    "",
-    "This is an interactive unblocking session with the human. Work through the",
-    "blocker together:",
-    "1. Explain, in plain terms, why the task is blocked and what is needed.",
-    "2. Investigate whatever the human asks (code, logs, the source item).",
-    "3. When the human resolves it, route the task where they say with a `handoff`",
-    "   message: `--to <lane>` (usually the lane it was in) and a note recording",
-    "   the resolution. The task moves ONLY on the human's word.",
-    "",
-    contract("unblock", input.reportCommand),
-  ].join("\n");
-}
+  release: (report) =>
+    [
+      "You are a merge agent: the review passed and you land the change.",
+      "- Rebase the branch on main if needed and make sure CI is green.",
+      "- Merge the PR (or fast-forward main) following the repo's conventions.",
+      "- Run any release/deploy step the repo defines for a merged change.",
+      "",
+      "When the change is merged (and released where applicable), hand off with",
+      "`--to done` summarizing what landed. If merging is not possible (conflicts",
+      "you cannot resolve, failing CI, missing permissions), hand off with",
+      "`--to blocked` describing exactly what is in the way.",
+      "",
+      contract("release", report),
+    ].join("\n"),
 
-const PROMPTS: Record<Role, (input: StagePromptInput) => string> = {
-  shape: shapePrompt,
-  execute: executePrompt,
-  review: reviewPrompt,
-  release: releasePrompt,
-  unblock: unblockPrompt,
+  unblock: (report) =>
+    [
+      "You are an unblocking agent: an interactive session with the human on a",
+      "blocked task. Work through the blocker together:",
+      "1. Explain, in plain terms, why the task is blocked and what is needed.",
+      "2. Investigate whatever the human asks (code, logs, the source item).",
+      "3. When the human resolves it, route the task where they say with a",
+      "   `handoff` message: `--to <lane>` (usually the lane it was in) and a note",
+      "   recording the resolution. The task moves ONLY on the human's word.",
+      "",
+      contract("unblock", report),
+    ].join("\n"),
 };
 
-export function rolePrompt(role: Role, input: StagePromptInput): string {
-  return PROMPTS[role](input);
+const KICKOFF: Record<Role, (input: StagePromptInput) => string> = {
+  shape: (input) =>
+    [
+      ...taskHeader("Shape", input.task),
+      handoffTrail(input.handoff),
+      "",
+      "Start the shaping session: restate the intent, ground it in the codebase,",
+      "then open with your questions for the user.",
+    ].join("\n"),
+
+  execute: (input) =>
+    [...taskHeader("Execute", input.task), handoffTrail(input.handoff), "", "Implement the shaped spec above."].join("\n"),
+
+  review: (input) =>
+    [...taskHeader("Blind-review", input.task), handoffTrail(input.handoff), "", "Review the change now."].join("\n"),
+
+  release: (input) =>
+    [...taskHeader("Merge & release", input.task), handoffTrail(input.handoff), "", "Land the change now."].join("\n"),
+
+  unblock: (input) =>
+    [
+      ...taskHeader("Unblock", input.task),
+      `Why it is blocked: ${input.reason ?? "(no reason recorded — check the handoff trail and the feed)"}`,
+      ...(input.cameFrom ? [`Lane it was in: ${input.cameFrom}`] : []),
+      "",
+      handoffTrail(input.handoff),
+      "",
+      "Open the session by explaining the blocker to the human and what would",
+      "resolve it.",
+    ].join("\n"),
+};
+
+export function rolePrompts(role: Role, input: StagePromptInput): RolePrompts {
+  return { system: SYSTEM[role](input.reportCommand), kickoff: KICKOFF[role](input) };
 }

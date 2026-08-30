@@ -1,5 +1,6 @@
 import type { Dispatcher, StageDispatchResult } from "../core/loop.ts";
 import type { Role, Task } from "../core/types.ts";
+import type { RolePrompts } from "../core/stages.ts";
 import type { HerdrClient } from "./client.ts";
 import { archiveTaskSpace, dispatchStage, stageAgentName, type DispatchOptions } from "./dispatch.ts";
 
@@ -19,8 +20,8 @@ export class HerdrDispatcher implements Dispatcher {
     return stageAgentName(this.prefix, taskId, role);
   }
 
-  dispatchStage(task: Task, role: Role, prompt: string): Promise<StageDispatchResult> {
-    return dispatchStage(this.herdr, task, role, prompt, this.prefix, this.opts);
+  dispatchStage(task: Task, role: Role, prompts: RolePrompts): Promise<StageDispatchResult> {
+    return dispatchStage(this.herdr, task, role, prompts, this.prefix, this.opts);
   }
 
   archiveTaskSpace(task: Task): Promise<void> {
