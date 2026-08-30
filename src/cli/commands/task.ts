@@ -1,5 +1,8 @@
 import { Command } from "commander";
-import type { Phase } from "../../core/types.ts";
+import { PHASES, type Phase } from "../../core/types.ts";
+import { canHandoff, isWorking } from "../../core/lifecycle.ts";
+import { TaskStore } from "../../core/tasks.ts";
+import { InboxStore } from "../../core/inbox.ts";
 import { buildEngine, requireInstance } from "../context.ts";
 import { selectedConfig, withConfigOption } from "../options.ts";
 
@@ -18,6 +21,10 @@ export function registerTask(program: Command): void {
   ).action(syncAction);
 
   withConfigOption(withListOptions(task.command("list").alias("ls").description("list tasks"))).action(listAction);
+
+  withConfigOption(
+    task.command("show <id>").description("one task: state, legal handoff targets, papertrail"),
+  ).action(showAction);
 
   withConfigOption(
     withTransitionOptions(task.command("transition <id> <phase>").description("move a task through the lifecycle")),
@@ -64,6 +71,32 @@ function listAction(opts: { config?: string; instance?: string; phase?: string }
   const engine = buildEngine(ctx);
   for (const t of engine.tasks.list(opts.phase as Phase | undefined)) {
     console.log(`#${t.id}\t${t.phase}\t${t.title}\t${t.agentName ?? ""}`);
+  }
+}
+
+function showAction(idRaw: string, opts: { config?: string; instance?: string }): void {
+  const ctx = requireInstance(selectedConfig(opts));
+  const tasks = new TaskStore(ctx.db);
+  const t = tasks.byId(Number(idRaw));
+  if (!t) throw new Error(`task ${idRaw} not found`);
+  const handoffs = PHASES.filter((p) => canHandoff(t.phase, p));
+  console.log(`#${t.id} ${t.title}`);
+  console.log(`phase     ${t.phase}${isWorking(t) ? ` (being worked by ${t.agentName})` : ""}`);
+  console.log(`url       ${t.url}`);
+  if (t.branch || t.prUrl) console.log(`branch    ${t.branch ?? "—"}    pr ${t.prUrl ?? "—"}`);
+  console.log(`handoffs  ${handoffs.length ? handoffs.join(", ") : "(none — only a human can move it from here)"}`);
+  const trail = new InboxStore(ctx.db).forTask(t.id).filter((m) => m.note || m.data);
+  if (trail.length) {
+    console.log("papertrail:");
+    for (const m of trail) {
+      const to = (m.data as any)?.to ? ` → ${(m.data as any).to}` : "";
+      console.log(`  [${m.stage ?? "·"}]${to} ${m.note ?? "(data)"}${m.outcome ? `  (${m.outcome})` : ""}`);
+    }
+  }
+  const events = tasks.events(t.id);
+  if (events.length) {
+    console.log("history:");
+    for (const e of events.slice(-8)) console.log(`  ${e.at.slice(0, 19)}  ${e.from ?? "·"} → ${e.to}  [${e.actor}] ${e.note ?? ""}`);
   }
 }
 

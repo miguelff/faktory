@@ -45,6 +45,8 @@ export interface Dispatcher {
 export interface LoopConfig {
   /** The `faktory report ...` prefix agents call to reach the inbox API. */
   reportCommandFor: (task: Task, role: Role, agentName: string) => string;
+  /** Agent-facing `faktory task` commands, scoped to this config. */
+  taskCliFor?: (task: Task) => { show: string; list: string };
 }
 
 export class Loop {
@@ -213,6 +215,7 @@ export class Loop {
       reason: blocking?.note ?? null,
       cameFrom: blocking?.from ?? null,
       reportCommand: this.cfg.reportCommandFor(task, role, agentName),
+      taskCli: this.cfg.taskCliFor?.(task),
     });
     try {
       const result = await this.dispatcher.dispatchStage(task, role, prompts);

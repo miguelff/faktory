@@ -29,6 +29,8 @@ export interface StagePromptInput {
   handoff: InboxMessage[];
   /** Base `faktory report` invocation, already scoped to this task. */
   reportCommand: string;
+  /** Agent-facing `faktory task` commands, already scoped to this config. */
+  taskCli?: { show: string; list: string };
   /** Why the task is blocked (unblock role only): the blocking transition's note. */
   reason?: string | null;
   /** Lane the task left when it was blocked (unblock role only). */
@@ -65,7 +67,7 @@ const NEXT: Readonly<Partial<Record<Role, string>>> = {
   release: "done",
 };
 
-function contract(role: Role, reportCommand: string): string {
+function contract(role: Role, reportCommand: string, taskCli?: { show: string; list: string }): string {
   const next = NEXT[role];
   return [
     "## Reporting back (required)",
@@ -90,6 +92,20 @@ function contract(role: Role, reportCommand: string): string {
       : []),
     "- A `note` message annotates the papertrail without moving the task.",
     "- The task NEVER moves on silence — it stays with you until you hand it off.",
+    ...(taskCli
+      ? [
+          "",
+          "## Faktory tooling",
+          "Your faktory instance's CLI is available in this shell:",
+          `- ${taskCli.show} — this task's state, its papertrail, and the handoff`,
+          "  targets legal from its current lane (an illegal handoff is rejected",
+          "  immediately, listing the legal ones).",
+          `- ${taskCli.list} — the whole board (id, phase, title, agent).`,
+          "- The report command above is the ONLY way to move the task or write to",
+          "  its papertrail. Everything else (`task transition`, `config`, `serve`,",
+          "  `invite`) is for humans — never run those.",
+        ]
+      : []),
     `(role: ${role} — ${HUMAN_LABEL[role]})`,
   ].join("\n");
 }
@@ -99,8 +115,8 @@ function taskHeader(verb: string, task: Task): string[] {
   return [`# ${verb} task #${task.id}: ${task.title}`, `Source: ${task.url}`, ""];
 }
 
-const SYSTEM: Record<Role, (reportCommand: string) => string> = {
-  shape: (report) =>
+const SYSTEM: Record<Role, (reportCommand: string, taskCli?: { show: string; list: string }) => string> = {
+  shape: (report, taskCli) =>
     [
       "You are a feature/bug shaping agent. Grill the user until you have a spec",
       "good enough to hand off to a programming agent, in this order:",
@@ -124,10 +140,10 @@ const SYSTEM: Record<Role, (reportCommand: string) => string> = {
       "If the user decides it is not ready, hand off with `--to backlog` and a",
       "note recording why.",
       "",
-      contract("shape", report),
+      contract("shape", report, taskCli),
     ].join("\n"),
 
-  execute: (report) =>
+  execute: (report, taskCli) =>
     [
       "You are an execution agent: you implement a shaped spec in a dedicated",
       "worktree on the task's branch.",
@@ -141,10 +157,10 @@ const SYSTEM: Record<Role, (reportCommand: string) => string> = {
       "If something goes wrong that only a human can resolve, hand off with",
       "`--to blocked`.",
       "",
-      contract("execute", report),
+      contract("execute", report, taskCli),
     ].join("\n"),
 
-  review: (report) =>
+  review: (report, taskCli) =>
     [
       "You are a blind-review agent: you judge a change with NO access to the",
       "execution conversation — only the diff (`git diff main...HEAD`), the shaped",
@@ -158,10 +174,10 @@ const SYSTEM: Record<Role, (reportCommand: string) => string> = {
       "- Something is wrong that neither lane can fix → hand off with `--to blocked`",
       "  describing it.",
       "",
-      contract("review", report),
+      contract("review", report, taskCli),
     ].join("\n"),
 
-  release: (report) =>
+  release: (report, taskCli) =>
     [
       "You are a merge agent: the review passed and you land the change.",
       "- Rebase the branch on main if needed and make sure CI is green.",
@@ -173,10 +189,10 @@ const SYSTEM: Record<Role, (reportCommand: string) => string> = {
       "you cannot resolve, failing CI, missing permissions), hand off with",
       "`--to blocked` describing exactly what is in the way.",
       "",
-      contract("release", report),
+      contract("release", report, taskCli),
     ].join("\n"),
 
-  unblock: (report) =>
+  unblock: (report, taskCli) =>
     [
       "You are an unblocking agent: an interactive session with the human on a",
       "blocked task. Work through the blocker together:",
@@ -186,7 +202,7 @@ const SYSTEM: Record<Role, (reportCommand: string) => string> = {
       "   `handoff` message: `--to <lane>` (usually the lane it was in) and a note",
       "   recording the resolution. The task moves ONLY on the human's word.",
       "",
-      contract("unblock", report),
+      contract("unblock", report, taskCli),
     ].join("\n"),
 };
 
@@ -223,5 +239,5 @@ const KICKOFF: Record<Role, (input: StagePromptInput) => string> = {
 };
 
 export function rolePrompts(role: Role, input: StagePromptInput): RolePrompts {
-  return { system: SYSTEM[role](input.reportCommand), kickoff: KICKOFF[role](input) };
+  return { system: SYSTEM[role](input.reportCommand, input.taskCli), kickoff: KICKOFF[role](input) };
 }

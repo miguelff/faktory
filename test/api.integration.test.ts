@@ -194,3 +194,21 @@ test("feed exposes recent action-feed entries", async () => {
   assert.equal(status, 200);
   assert.ok(Array.isArray(body.feed));
 });
+
+test("a doomed handoff is rejected at the endpoint with the legal targets", async () => {
+  // Task 1 is in `shape` (from the transition test above).
+  const missing = await api("/api/tasks/1/inbox", {
+    method: "POST",
+    body: JSON.stringify({ type: "handoff", sender: "a1", stage: "shape", note: "x" }),
+  });
+  assert.equal(missing.status, 400);
+  assert.match(missing.body.error, /legal from shape: backlog, execute/);
+
+  const illegal = await api("/api/tasks/1/inbox", {
+    method: "POST",
+    body: JSON.stringify({ type: "handoff", sender: "a1", stage: "shape", note: "x", data: { to: "release" } }),
+  });
+  assert.equal(illegal.status, 409);
+  assert.match(illegal.body.error, /illegal handoff shape → release/);
+  assert.match(illegal.body.error, /legal from shape: backlog, execute/);
+});

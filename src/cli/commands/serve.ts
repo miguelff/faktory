@@ -74,11 +74,15 @@ interface ServeOpts {
   board: boolean; // commander sets `board: false` for --no-board
 }
 
-/** Build the loop config that binds agents' `faktory report` command. */
+/** Build the loop config that binds agents' `faktory report` + `faktory task` commands. */
 function loopConfig(engine: Engine, slug: string, port: number) {
   return {
     reportCommandFor: (task: Task, role: Role, agentName: string) =>
       `${FAKTORY_BIN} report ${task.id} --config ${slug} --port ${port} --sender ${agentName} --stage ${role}`,
+    taskCliFor: (task: Task) => ({
+      show: `${FAKTORY_BIN} task show ${task.id} --config ${slug}`,
+      list: `${FAKTORY_BIN} task list --config ${slug}`,
+    }),
   };
 }
 

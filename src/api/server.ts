@@ -3,6 +3,7 @@ import type { Engine } from "../core/engine.ts";
 import type { Phase, Role } from "../core/types.ts";
 import { PHASES, STAGES } from "../core/types.ts";
 import { isInboxType } from "../core/inbox.ts";
+import { canHandoff } from "../core/lifecycle.ts";
 
 /**
  * HTTP control plane. It is now a thin, read-mostly surface: the board/feed for
@@ -116,6 +117,19 @@ export function createApiServer(deps: ApiDeps): Server {
     const stage = body.stage as Role | undefined;
     if (stage != null && stage !== "unblock" && !(STAGES as readonly string[]).includes(stage)) {
       return json(res, 400, { error: `invalid stage ${JSON.stringify(body.stage)}` });
+    }
+    // Fail a doomed handoff NOW so the agent gets its legal moves back — the
+    // loop still re-validates on apply (the phase may change in between).
+    if (body.type === "handoff") {
+      const to = (body.data as Record<string, unknown> | null)?.to;
+      const task = deps.engine.tasks.byId(id)!;
+      const legal = PHASES.filter((p) => canHandoff(task.phase, p));
+      if (typeof to !== "string" || !(PHASES as readonly string[]).includes(to)) {
+        return json(res, 400, { error: `a handoff requires data.to — legal from ${task.phase}: ${legal.join(", ") || "(none)"}` });
+      }
+      if (!canHandoff(task.phase, to as Phase)) {
+        return json(res, 409, { error: `illegal handoff ${task.phase} → ${to} — legal from ${task.phase}: ${legal.join(", ") || "(none)"}` });
+      }
     }
     const message = deps.engine.inbox.enqueue({
       taskId: id,

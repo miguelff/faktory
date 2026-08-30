@@ -120,3 +120,16 @@ test("the role's standing orders are the system prompt; the task is the kickoff"
   assert.match(kickoff, /task #7: Add a widget/);
   assert.match(kickoff, /no prior handoff/);
 });
+
+test("the standing orders teach the agent its faktory tooling", () => {
+  const { system } = rolePrompts("execute", {
+    task: task({ phase: "execute" }),
+    handoff: [],
+    reportCommand: REPORT,
+    taskCli: { show: "faktory task show 7 --config fk", list: "faktory task list --config fk" },
+  });
+  assert.match(system, /## Faktory tooling/);
+  assert.match(system, /faktory task show 7 --config fk/);
+  assert.match(system, /faktory task list --config fk/);
+  assert.match(system, /`task transition`, `config`, `serve`,\n\s+`invite`\) is for humans/);
+});

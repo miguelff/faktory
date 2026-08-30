@@ -16,7 +16,7 @@ and manual repair transitions.
 | GET    | `/api/board`                | —                                               | `{ columns: { phase, tasks }[] }` (one per phase, priority-desc) |
 | GET    | `/api/feed`                 | — (`?limit=` , default 50)                      | `{ feed: FeedEntry[] }` newest first |
 | POST   | `/api/sync`                 | —                                               | pulls source candidates; `{ discovered: Task[] }` |
-| POST   | `/api/tasks/:id/inbox`      | `{ type, sender?, stage?, note?, data? }`       | enqueue a typed message for the loop (the agent→loop channel). `type ∈ handoff \| note` (`handoff` routes to `data.to`). `202` with `{ ok, message }`; the loop validates + applies it. `400` on a bad type/stage, `404` when unknown. |
+| POST   | `/api/tasks/:id/inbox`      | `{ type, sender?, stage?, note?, data? }`       | enqueue a typed message for the loop (the agent→loop channel). `type ∈ handoff \| note` (`handoff` routes to `data.to`). `202` with `{ ok, message }`; the loop validates + applies it. `400` on a bad type/stage or a handoff without `data.to`, `409` on an illegal handoff target (both list the legal targets), `404` when unknown. |
 | POST   | `/api/tasks/:id/transition` | `{ to, actor?, note?, force? }`                 | **manual repair only** — validated lifecycle move mirrored to the source; `force` bypasses validation (still audited). `409` on illegal moves, `400` on a bad phase. |
 | POST   | `/api/tasks/:id/comment`    | `{ note?, from?, to?, data? }`                  | leaves a `<handoff from to>` papertrail comment on the work unit. Returns `{ ok, body }` with the rendered marker. `400` when empty, `404` when unknown. |
 

@@ -162,3 +162,33 @@ test("a nonexistent --config fails with guidance, not a raw db error", async () 
   assert.match(res.stderr, /config "ghost" does not exist/);
   assert.doesNotMatch(res.stderr, /unable to open database/);
 });
+
+test("task show prints state, legal handoff targets, and the papertrail", async () => {
+  const home = mkdtempSync(join(tmpdir(), "fk-cli-"));
+  try {
+    process.env.FAKTORY_HOME = home;
+    const ref = instanceRef("main");
+    const db = openDb(ensureInstanceDir(ref).dbPath);
+    db.prepare("INSERT INTO sources (id, kind, config) VALUES ('primary','notion','{}')").run();
+    db.prepare(
+      "INSERT INTO tasks (source_id, item_id, title, url, phase) VALUES ('primary','n1','Widget','u-n1','review')",
+    ).run();
+    db.prepare(
+      "INSERT INTO inbox (task_id, stage, type, sender, note, data, applied_at, outcome) VALUES (1,'execute','handoff','a1','built it','{\"to\":\"review\"}','t','applied')",
+    ).run();
+    db.close();
+    delete process.env.FAKTORY_HOME;
+
+    const { stdout, stderr } = await execFileAsync(BIN, ["task", "show", "1", "--config", "main"], {
+      env: { ...process.env, FAKTORY_HOME: home },
+    });
+    assert.equal(stderr, "");
+    assert.match(stdout, /#1 Widget/);
+    assert.match(stdout, /phase\s+review/);
+    assert.match(stdout, /handoffs\s+execute, release, blocked/, "lists exactly the legal agent moves");
+    assert.match(stdout, /\[execute\] → review built it/);
+  } finally {
+    delete process.env.FAKTORY_HOME;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
