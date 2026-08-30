@@ -192,6 +192,13 @@ never declares an agent dead. A task moves only on a terminal `handoff` inbox
 message from the current dispatched agent — silence is never read as success,
 and unsigned/mismatched or stray-duplicate messages are rejected.
 
+**Assignment auto-repair.** The one thing the loop does verify is referential
+integrity: each tick it checks recorded task assignments (workspace id, agent
+name) against herdr's live inventory. A coordinate that no longer exists —
+session recreated, workspace closed by hand — is cleared and the role is
+reprovisioned with the papertrail; existence only, never liveness, and an
+unreachable herdr repairs nothing (gone and can't-ask are different).
+
 ## Installer & onboarding
 
 Faktory ships a macOS installer (`install.sh` + `faktory config new`) so a fresh

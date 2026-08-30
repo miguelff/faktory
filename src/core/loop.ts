@@ -40,6 +40,11 @@ export interface Dispatcher {
   dispatchStage(task: Task, role: Role, prompts: RolePrompts): Promise<StageDispatchResult>;
   /** Close the task's herdr space (used on archive). */
   archiveTaskSpace(task: Task): Promise<void>;
+  /**
+   * The live herdr inventory (existing workspace ids and agent names), used to
+   * verify that recorded task assignments still point at real things.
+   */
+  inventory(): Promise<{ workspaceIds: string[]; agentNames: string[] }>;
 }
 
 export interface LoopConfig {
@@ -61,6 +66,7 @@ export class Loop {
   async tick(): Promise<void> {
     await this.engine.syncCandidates();
     await this.drainInbox();
+    await this.repairAssignments();
     await this.reapArchived();
     await this.maintainDispatch();
   }
@@ -185,6 +191,55 @@ export class Loop {
       }
       this.engine.tasks.update(task.id, { workspaceId: null, paneId: null, agentName: null, stage: null, dispatchedAt: null });
       this.engine.feed.append({ taskId: task.id, kind: "transition", actor: "engine", message: "archived: closed herdr space" });
+    }
+  }
+
+  /**
+   * Auto-repair stale herdr assignments. A task records where it is worked
+   * (workspaceId, agentName); after a session restart or a hand-closed
+   * workspace those coordinates can point at nothing, leaving the task
+   * "being worked" forever — or dispatch failing against a dead workspace.
+   * When a recorded coordinate cannot be identified in herdr's live
+   * inventory, it is cleared so the next pass provisions a fresh session
+   * (with the papertrail). Existence only, never liveness: a quiet or busy
+   * session that still exists is never touched — herdr owns interactivity.
+   * When herdr itself is unreachable, nothing can be identified either way,
+   * so nothing is repaired.
+   */
+  private async repairAssignments(): Promise<void> {
+    const tasks = this.engine.tasks.list().filter((t) => roleFor(t.phase) && (t.workspaceId || t.agentName));
+    if (tasks.length === 0) return;
+    let inventory: { workspaceIds: string[]; agentNames: string[] };
+    try {
+      inventory = await this.dispatcher.inventory();
+    } catch {
+      return; // herdr unreachable — cannot tell "gone" from "can't ask"
+    }
+    const workspaces = new Set(inventory.workspaceIds);
+    const agents = new Set(inventory.agentNames);
+    for (const task of tasks) {
+      const gone: string[] = [];
+      const patch: Record<string, string | null> = {};
+      if (task.workspaceId && !workspaces.has(task.workspaceId)) {
+        patch.workspaceId = null;
+        patch.paneId = null;
+        gone.push(`workspace ${task.workspaceId}`);
+      }
+      if (task.agentName && !agents.has(task.agentName)) {
+        patch.agentName = null;
+        patch.stage = null;
+        patch.paneId = null;
+        patch.dispatchedAt = null;
+        gone.push(`agent ${task.agentName}`);
+      }
+      if (!gone.length) continue;
+      this.engine.tasks.update(task.id, patch);
+      this.engine.feed.append({
+        taskId: task.id,
+        kind: "repair",
+        actor: "engine",
+        message: `auto-repaired stale herdr assignment: ${gone.join(", ")} no longer exists — reprovisioning`,
+      });
     }
   }
 

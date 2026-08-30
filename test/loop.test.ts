@@ -37,16 +37,26 @@ class FakeSource implements WorkSource {
 class FakeDispatcher implements Dispatcher {
   dispatched: Array<{ taskId: number; stage: Role; agentName: string }> = [];
   archived: number[] = [];
+  /** Live herdr inventory; dispatch registers into it, tests mutate it. */
+  workspaces = new Set<string>();
+  agents = new Set<string>();
+  inventoryError: Error | undefined;
   agentNameFor(taskId: number, role: Role): string {
     return `a-t${taskId}-${role}`;
   }
   async dispatchStage(task: Task, role: Role, _prompts: RolePrompts): Promise<StageDispatchResult> {
     const agentName = this.agentNameFor(task.id, role);
     this.dispatched.push({ taskId: task.id, stage: role, agentName });
+    this.workspaces.add(`ws${task.id}`);
+    this.agents.add(agentName);
     return { workspaceId: `ws${task.id}`, paneId: `ws${task.id}:p-${role}`, agentName, branch: `b/${task.id}` };
   }
   async archiveTaskSpace(task: Task) {
     this.archived.push(task.id);
+  }
+  async inventory(): Promise<{ workspaceIds: string[]; agentNames: string[] }> {
+    if (this.inventoryError) throw this.inventoryError;
+    return { workspaceIds: [...this.workspaces], agentNames: [...this.agents] };
   }
 }
 
@@ -376,4 +386,59 @@ test("a failed dispatch is surfaced and retried on the next pass, never blocking
   await loop.tick();
   t = engine.tasks.byId(1)!;
   assert.equal(t.agentName, "a-t1-shape", "retried once herdr is back");
+});
+
+test("a stale agent assignment is auto-repaired: cleared and reprovisioned with the trail", async () => {
+  const h = harness();
+  const { engine, dispatcher, loop } = h;
+  const t = await seedInShape(h, [item("n1", "One", 5)]);
+  // The herdr session lost the agent (restart, killed tab) but the workspace survives.
+  dispatcher.agents.delete(t.agentName!);
+  await loop.tick();
+  const after = engine.tasks.byId(1)!;
+  assert.equal(after.phase, "shape", "the task never moves on a repair");
+  assert.equal(after.agentName, "a-t1-shape", "a fresh session was provisioned");
+  assert.equal(dispatcher.dispatched.length, 2, "re-dispatched exactly once");
+  assert.ok(engine.feed.recent(10).some((e) => e.kind === "repair" && /agent a-t1-shape no longer exists/.test(e.message)));
+});
+
+test("a stale workspace assignment is auto-repaired so dispatch provisions a fresh space", async () => {
+  const h = harness();
+  const { engine, dispatcher, loop } = h;
+  const t = await seedInShape(h, [item("n1", "One", 5)]);
+  // The whole herdr session is new: neither the workspace nor the agent exist.
+  dispatcher.workspaces.delete(t.workspaceId!);
+  dispatcher.agents.delete(t.agentName!);
+  await loop.tick();
+  const after = engine.tasks.byId(1)!;
+  assert.equal(after.workspaceId, "ws1", "a fresh space was provisioned");
+  assert.equal(after.agentName, "a-t1-shape");
+  assert.ok(
+    engine.feed.recent(10).some((e) => e.kind === "repair" && /workspace ws1/.test(e.message) && /agent a-t1-shape/.test(e.message)),
+  );
+});
+
+test("an unreachable herdr repairs nothing — gone and can't-ask are different", async () => {
+  const h = harness();
+  const { engine, dispatcher, loop } = h;
+  const t = await seedInShape(h, [item("n1", "One", 5)]);
+  dispatcher.agents.clear();
+  dispatcher.workspaces.clear();
+  dispatcher.inventoryError = new Error("herdr down");
+  await loop.tick();
+  const after = engine.tasks.byId(1)!;
+  assert.equal(after.agentName, t.agentName, "assignment untouched while herdr is unreachable");
+  assert.equal(after.workspaceId, t.workspaceId);
+  assert.equal(dispatcher.dispatched.length, 1, "no re-dispatch");
+});
+
+test("a healthy assignment is never repaired", async () => {
+  const h = harness();
+  const { engine, dispatcher, loop } = h;
+  const t = await seedInShape(h, [item("n1", "One", 5)]);
+  for (let i = 0; i < 3; i++) await loop.tick();
+  const after = engine.tasks.byId(1)!;
+  assert.equal(after.agentName, t.agentName);
+  assert.equal(after.dispatchedAt, t.dispatchedAt, "not re-dispatched");
+  assert.ok(!engine.feed.recent(20).some((e) => e.kind === "repair"));
 });

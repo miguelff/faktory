@@ -28,4 +28,14 @@ export class HerdrDispatcher implements Dispatcher {
     return archiveTaskSpace(this.herdr, task);
   }
 
+  async inventory(): Promise<{ workspaceIds: string[]; agentNames: string[] }> {
+    const [ws, ag] = await Promise.all([
+      this.herdr.request<any>("workspace.list", {}),
+      this.herdr.request<any>("agent.list", {}),
+    ]);
+    return {
+      workspaceIds: ((ws?.workspaces ?? []) as any[]).map((w) => w.workspace_id ?? w.id).filter(Boolean),
+      agentNames: ((ag?.agents ?? []) as any[]).map((a) => a.agent_name ?? a.name).filter(Boolean),
+    };
+  }
 }
