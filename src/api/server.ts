@@ -66,6 +66,21 @@ export function createApiServer(deps: ApiDeps): Server {
     json(res, 200, { discovered: fresh });
   });
 
+  // The local error log: flagged inconsistencies between the datasource and the
+  // local snapshot (failed write-throughs, lost CAS, reconcile mismatches).
+  // These live only locally — never in the datasource.
+  route("GET", "/api/errors", async (req, res) => {
+    const url = new URL(req.url!, "http://x");
+    const all = url.searchParams.get("all") === "1";
+    json(res, 200, { errors: all ? deps.engine.errors.all() : deps.engine.errors.open() });
+  });
+
+  route("POST", "/api/errors/:id/resolve", async (_req, res, p) => {
+    const ok = deps.engine.errors.resolve(Number(p.id));
+    if (!ok) return json(res, 404, { error: "no open error with that id" });
+    json(res, 200, { ok: true });
+  });
+
   // Manual repair only — the loop owns automatic transitions. `force` bypasses
   // lifecycle validation (still audited) for stuck-state repair.
   route("POST", "/api/tasks/:id/transition", async (req, res, p) => {
@@ -73,12 +88,14 @@ export function createApiServer(deps: ApiDeps): Server {
     const to = body.to as Phase;
     if (!PHASES.includes(to)) return json(res, 400, { error: `invalid phase ${JSON.stringify(body.to)}` });
     try {
-      const task = body.force
-        ? deps.engine.tasks.transition(Number(p.id), to, String(body.actor ?? "api"), {
-            force: true,
-            note: body.note,
-          })
-        : await deps.engine.transition(Number(p.id), to, String(body.actor ?? "api"), body.note);
+      const task = await deps.engine.transition(
+        Number(p.id),
+        to,
+        String(body.actor ?? "api"),
+        body.note,
+        undefined,
+        { force: !!body.force },
+      );
       json(res, 200, { task });
     } catch (e) {
       json(res, 409, { error: String((e as Error).message) });

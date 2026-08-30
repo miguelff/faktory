@@ -221,3 +221,31 @@ test("a doomed handoff is rejected at the endpoint with the legal targets", asyn
   assert.match(illegal.body.error, /illegal handoff shape → release/);
   assert.match(illegal.body.error, /legal from shape: backlog, execute/);
 });
+
+test("the local error log surfaces a lost CAS and lets an operator resolve it", async () => {
+  source.items = [...source.items, workItem("n9", "Nine", 1)];
+  await api("/api/sync", { method: "POST" });
+  const { body: list } = await api("/api/tasks?phase=backlog");
+  const task = list.tasks.find((t: any) => t.title === "Nine");
+  assert.ok(task, "the entry was discovered into backlog");
+
+  // Another instance wins the claim: leaving backlog is a lost CAS.
+  source.nextClaimWinner = "faktory-other";
+  const res = await api(`/api/tasks/${task.id}/transition`, {
+    method: "POST",
+    body: JSON.stringify({ to: "shape", actor: "human" }),
+  });
+  assert.equal(res.status, 409, "the lost claim is reported to the caller");
+
+  const { body: open } = await api("/api/errors");
+  const cas = open.errors.find((e: any) => e.kind === "cas" && e.taskId === task.id);
+  assert.ok(cas, "the lost CAS is flagged in the local error log");
+
+  const resolved = await api(`/api/errors/${cas.id}/resolve`, { method: "POST" });
+  assert.equal(resolved.status, 200);
+  const { body: after } = await api("/api/errors");
+  assert.ok(!after.errors.some((e: any) => e.id === cas.id), "resolved errors drop out of the open log");
+
+  const again = await api(`/api/errors/${cas.id}/resolve`, { method: "POST" });
+  assert.equal(again.status, 404, "resolving an already-resolved error 404s");
+});

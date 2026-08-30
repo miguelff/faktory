@@ -3,7 +3,7 @@ import { execFile } from "node:child_process";
 import type { Engine } from "../core/engine.ts";
 import { HerdrClient } from "../herdr/client.ts";
 import { TRANSITIONS, isStage, isWorking } from "../core/lifecycle.ts";
-import { PHASES, type FeedEntry, type Phase, type Task } from "../core/types.ts";
+import { PHASES, type ErrorEntry, type FeedEntry, type Phase, type Task } from "../core/types.ts";
 
 /**
  * Faktory TUI — the local interface: a kanban board of the pipeline plus a live
@@ -60,7 +60,7 @@ const COL_WIDTH = 22;
 const FEED_LINES = 7;
 const REFRESH_MS = 1500;
 
-type Mode = "board" | "detail" | "transition";
+type Mode = "board" | "detail" | "transition" | "errors";
 
 export class Tui {
   private mode: Mode = "board";
@@ -71,6 +71,8 @@ export class Tui {
   private showArchived = false;
   private board = new Map<Phase, Task[]>();
   private feed: FeedEntry[] = [];
+  private errors: ErrorEntry[] = [];
+  private errorRow = 0; // index into the open-errors list
   private message = "";
   private busy = false;
   private timer?: ReturnType<typeof setInterval>;
@@ -118,6 +120,8 @@ export class Tui {
     const selectedId = this.selected()?.id;
     this.board = new Map(PHASES.map((p) => [p, this.engine.tasks.list(p)]));
     this.feed = this.engine.feed.recent(FEED_LINES);
+    this.errors = this.engine.errors.open();
+    this.errorRow = Math.max(0, Math.min(this.errorRow, Math.max(this.errors.length - 1, 0)));
     // Keep the selection stable across refreshes when the task still exists.
     if (selectedId != null) {
       const phases = this.visiblePhases();
@@ -173,8 +177,22 @@ export class Tui {
         if (key.name === "o" && this.selected()) return this.openUrl();
         if (key.name === "w" && this.selected()) return this.gotoSession();
         if (key.name === "s") return this.sync();
+        if (key.name === "e") {
+          this.mode = "errors";
+          this.errorRow = 0;
+        }
         if (key.name === "r") this.refresh("Reloaded");
         this.clampCursor();
+        break;
+      case "errors":
+        if (key.name === "q" || key.name === "escape") {
+          this.mode = "board";
+          break;
+        }
+        if (key.name === "j" || key.name === "down") this.errorRow++;
+        if (key.name === "k" || key.name === "up") this.errorRow--;
+        if (key.name === "return" || key.name === "x") return this.resolveError();
+        this.errorRow = Math.max(0, Math.min(this.errorRow, Math.max(this.errors.length - 1, 0)));
         break;
       case "detail":
         if (key.name === "q" || key.name === "escape") this.mode = "board";
@@ -310,10 +328,24 @@ export class Tui {
     this.render();
   }
 
+  /** Mark the selected open error resolved (local error log only). */
+  private resolveError(): void {
+    const e = this.errors[this.errorRow];
+    if (!e) {
+      this.message = "no error selected";
+      return this.render();
+    }
+    this.engine.errors.resolve(e.id);
+    this.reload();
+    this.errorRow = Math.max(0, Math.min(this.errorRow, Math.max(this.errors.length - 1, 0)));
+    this.message = `resolved error #${e.id}`;
+    if (this.errors.length === 0) this.mode = "board";
+    this.render();
+  }
+
   private async transitionTo(task: Task, to: Phase, force: boolean): Promise<void> {
     await this.withSpinner(`#${task.id} → ${to}${force ? " (forced)" : ""}`, async () => {
-      if (force) this.engine.tasks.transition(task.id, to, "tui", { force: true, note: "manual repair" });
-      else await this.engine.transition(task.id, to, "tui");
+      await this.engine.transition(task.id, to, "tui", force ? "manual repair" : undefined, undefined, { force });
       this.refresh(`#${task.id} → ${to}`);
       this.mode = "detail";
     });
@@ -333,10 +365,12 @@ export class Tui {
     const lines: string[] = [];
 
     const counts = PHASES.map((p) => `${PHASE_LABEL[p][0]}${this.column(p).length}`).join(" ");
-    lines.push(C.bold(` ⚙ faktory ${C.accent(this.prefix)} `) + C.dim(`— kanban · ${counts}`));
+    const errTag = this.errors.length ? "  " + C.err(`⚠ ${this.errors.length} error${this.errors.length > 1 ? "s" : ""}`) : "";
+    lines.push(C.bold(` ⚙ faktory ${C.accent(this.prefix)} `) + C.dim(`— kanban · ${counts}`) + errTag);
     lines.push(C.dim("─".repeat(Math.min(cols, 120))));
 
     if (this.mode === "board") this.renderBoard(lines, rows, cols);
+    else if (this.mode === "errors") this.renderErrors(lines, rows, cols);
     else this.renderDetail(lines, cols);
 
     const msg = this.busy ? C.warn(this.message) : this.message;
@@ -366,8 +400,33 @@ export class Tui {
     for (const e of this.feed) lines.push("  " + this.feedLine(e, cols - 4));
     for (let i = this.feed.length; i < FEED_LINES; i++) lines.push("");
     lines.push(
-      C.dim(" h/l column · j/k card · enter detail · t transition · u unblock · x unclaim · w session · o url · s sync · d done · a archived · q quit"),
+      C.dim(" h/l column · j/k card · enter detail · t transition · u unblock · x unclaim · w session · o url · s sync · e errors · d done · a archived · q quit"),
     );
+  }
+
+  /**
+   * The local error log: inconsistencies between the datasource (source of
+   * truth) and the local snapshot. Semantic colors (red = lost CAS, yellow =
+   * failing write-through, cyan = reconcile drift); enter/x resolves; q leaves.
+   */
+  private renderErrors(lines: string[], rows: number, cols: number): void {
+    lines.push(C.bold(" errors ") + C.dim(`— ${this.errors.length} open`));
+    lines.push("");
+    if (this.errors.length === 0) {
+      lines.push(C.dim("   no open errors — the datasource and the local snapshot agree"));
+    } else {
+      const shown = this.errors.slice(0, Math.max(1, rows - 8));
+      shown.forEach((e, i) => {
+        const sel = i === this.errorRow;
+        const tone = e.kind === "cas" ? C.err : e.kind === "write-through" ? C.warn : C.info;
+        const tag = e.taskId ? `#${e.taskId}` : "·";
+        const text = `${(e.at ?? "").slice(11, 19)}  ${tag} [${e.kind}] ${e.message}`;
+        lines.push("  " + (sel ? C.inv(pad(text, cols - 4)) : tone(truncate(text, cols - 4))));
+      });
+      if (this.errors.length > shown.length) lines.push(C.dim(`   … +${this.errors.length - shown.length} more`));
+    }
+    lines.push("");
+    lines.push(C.dim(" j/k select · enter/x resolve · q board"));
   }
 
   /** Build one fixed-width column: a header cell + card cells, padded to height. */
