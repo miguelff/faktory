@@ -1,5 +1,5 @@
 import { setTimeout as sleep } from "node:timers/promises";
-import type { WorkItem } from "../core/types.ts";
+import type { WorkItem, WorkItemDetails } from "../core/types.ts";
 import { FAKTORY_STATUSES } from "../core/lifecycle.ts";
 import type { SourceConfigRecord, SourceContext, WorkSource } from "./types.ts";
 
@@ -68,6 +68,118 @@ export function pageToWorkItem(page: any, cfg: NotionSourceConfig): WorkItem {
     updatedAt: page.last_edited_time ?? null,
     raw: page,
   };
+}
+
+/** Pure: flatten Notion rich_text to markdown-ish inline text (links kept). */
+function richText(rt: any[] | undefined): string {
+  return (rt ?? [])
+    .map((t: any) => {
+      const text = t.plain_text ?? "";
+      return t.href ? `[${text}](${t.href})` : text;
+    })
+    .join("");
+}
+
+/**
+ * Pure: render Notion blocks as markdown. Covers the common block types and
+ * degrades gracefully — an unknown block renders its rich_text (when it has
+ * any) as a plain paragraph. Flat: child blocks are not fetched recursively.
+ * Exported for tests.
+ */
+export function blocksToMarkdown(blocks: any[]): string {
+  let numbered = 0;
+  const lines: string[] = [];
+  for (const b of blocks) {
+    const data = b[b.type] ?? {};
+    if (b.type !== "numbered_list_item") numbered = 0;
+    switch (b.type) {
+      case "heading_1":
+        lines.push(`# ${richText(data.rich_text)}`);
+        break;
+      case "heading_2":
+        lines.push(`## ${richText(data.rich_text)}`);
+        break;
+      case "heading_3":
+        lines.push(`### ${richText(data.rich_text)}`);
+        break;
+      case "bulleted_list_item":
+        lines.push(`- ${richText(data.rich_text)}`);
+        break;
+      case "numbered_list_item":
+        lines.push(`${++numbered}. ${richText(data.rich_text)}`);
+        break;
+      case "to_do":
+        lines.push(`- [${data.checked ? "x" : " "}] ${richText(data.rich_text)}`);
+        break;
+      case "quote":
+        lines.push(`> ${richText(data.rich_text)}`);
+        break;
+      case "callout":
+        lines.push(`> ${richText(data.rich_text)}`);
+        break;
+      case "code":
+        lines.push("```" + (data.language ?? ""), richText(data.rich_text), "```");
+        break;
+      case "divider":
+        lines.push("---");
+        break;
+      case "child_page":
+        lines.push(`(subpage: ${data.title ?? ""})`);
+        break;
+      case "child_database":
+        lines.push(`(database: ${data.title ?? ""})`);
+        break;
+      default: {
+        const text = richText(data.rich_text);
+        if (text) lines.push(text);
+      }
+    }
+  }
+  return lines.join("\n").trim();
+}
+
+/**
+ * Pure: the page's source-native properties, simplified to plain values. The
+ * faktory-managed columns and the title (already surfaced) are excluded.
+ * Exported for tests.
+ */
+export function pageMeta(page: any, cfg: NotionSourceConfig): Record<string, unknown> {
+  const names = propNames(cfg);
+  const internal = new Set<string>([names.status, names.ownedBy, names.ownedAt]);
+  const meta: Record<string, unknown> = {};
+  for (const [name, prop] of Object.entries<any>(page.properties ?? {})) {
+    if (internal.has(name) || prop?.type === "title") continue;
+    const value = simplifyProp(prop);
+    if (value != null) meta[name] = value;
+  }
+  return meta;
+}
+
+function simplifyProp(prop: any): unknown {
+  switch (prop?.type) {
+    case "select":
+      return prop.select?.name ?? null;
+    case "status":
+      return prop.status?.name ?? null;
+    case "multi_select":
+      return (prop.multi_select ?? []).map((o: any) => o.name);
+    case "number":
+      return prop.number;
+    case "checkbox":
+      return prop.checkbox;
+    case "date":
+      return prop.date?.start ?? null;
+    case "url":
+      return prop.url;
+    case "email":
+      return prop.email;
+    case "rich_text":
+      return richText(prop.rich_text) || null;
+    case "people":
+      return (prop.people ?? []).map((p: any) => p.name).filter(Boolean);
+    default:
+      return null;
+  }
 }
 
 /**
@@ -198,6 +310,39 @@ class NotionSource implements WorkSource {
         properties: { [this.names.status]: { select: { name: status } } },
       }),
     });
+  }
+
+  /**
+   * Full detail for `task show --json`: title from the page, body as the
+   * page's blocks rendered to markdown, trail from the page's comment thread
+   * (oldest first — Notion returns comments in chronological order), meta from
+   * the non-faktory page properties.
+   */
+  async details(itemId: string): Promise<WorkItemDetails> {
+    const [page, blocks, comments] = await Promise.all([
+      this.call(`/pages/${itemId}`),
+      this.paginate(`/blocks/${itemId}/children`),
+      this.paginate(`/comments?block_id=${itemId}`),
+    ]);
+    return {
+      title: pageToWorkItem(page, this.cfg).title,
+      body: blocksToMarkdown(blocks),
+      trail: comments.map((c: any) => richText(c.rich_text)).filter(Boolean),
+      meta: pageMeta(page, this.cfg),
+    };
+  }
+
+  /** Follow a paginated GET, concatenating `results`. */
+  private async paginate(path: string): Promise<any[]> {
+    const sep = path.includes("?") ? "&" : "?";
+    const out: any[] = [];
+    let cursor: string | undefined;
+    do {
+      const body = await this.call(`${path}${sep}page_size=100${cursor ? `&start_cursor=${cursor}` : ""}`);
+      out.push(...(body.results ?? []));
+      cursor = body.has_more ? body.next_cursor : undefined;
+    } while (cursor);
+    return out;
   }
 
   /** Post the handoff marker into the page's comment thread. */

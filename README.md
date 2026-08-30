@@ -129,6 +129,7 @@ Other commands:
 bin/faktory task sync --config omnia          # pull candidates into the task table
 bin/faktory task list --config omnia          # list tasks (alias: task ls)
 bin/faktory task show 7 --config omnia        # one task: state, legal handoffs, papertrail
+bin/faktory task show 7 --json --config omnia # full detail from the source: { title, body, trail, meta }
 bin/faktory tui       --config omnia          # inspect / repair in the terminal
 bin/faktory invite omnia                     # share this config's datasource
 bin/faktory join   <string>                  # link a new config to a shared datasource

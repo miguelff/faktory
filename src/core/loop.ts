@@ -259,14 +259,13 @@ export class Loop {
 
   private async dispatch(task: Task, role: Role): Promise<void> {
     const agentName = this.dispatcher.agentNameFor(task.id, role);
-    const handoff = this.engine.inbox.forTask(task.id);
     // The unblocking session's context lives in the audit trail: the
     // transition that moved the task into blocked carries the reason (its
-    // note) and the lane it left (its `from`).
+    // note) and the lane it left (its `from`). Everything else the agent
+    // needs it fetches itself (`task show --json`).
     const blocking = role === "unblock" ? this.engine.tasks.events(task.id).findLast((e) => e.to === "blocked") : undefined;
     const prompts = rolePrompts(role, {
       task,
-      handoff,
       reason: blocking?.note ?? null,
       cameFrom: blocking?.from ?? null,
       reportCommand: this.cfg.reportCommandFor(task, role, agentName),

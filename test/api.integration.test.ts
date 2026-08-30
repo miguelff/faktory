@@ -27,6 +27,15 @@ class FakeSource implements WorkSource {
   async getItem(id: string) {
     return this.items.find((i) => i.id === id) ?? null;
   }
+  async details(id: string) {
+    const item = this.items.find((i) => i.id === id);
+    return {
+      title: item?.title ?? "?",
+      body: `body of ${id}`,
+      trail: this.comments.filter((c) => c.id === id).map((c) => c.body),
+      meta: { source: "fake" },
+    };
+  }
   async unclaim(id: string) {
     delete this.owners[id];
   }

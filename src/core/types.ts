@@ -37,6 +37,21 @@ export type Stage = (typeof STAGES)[number];
  */
 export type Role = Stage | "unblock";
 
+/**
+ * Full detail of a work item, fetched on demand — agents pull it as JSON via
+ * `faktory task show <id> --json` instead of having it inlined into prompts.
+ */
+export interface WorkItemDetails {
+  /** The item's title in the source. */
+  title: string;
+  /** The item's content as markdown (a Notion page's blocks, an issue body, …). */
+  body: string;
+  /** The comment feed, oldest first — the papertrail of handoffs plus human comments. */
+  trail: string[];
+  /** Source-native properties (a Notion page's non-faktory properties, labels, …). */
+  meta: Record<string, unknown>;
+}
+
 /** A normalized unit of work coming from any source. */
 export interface WorkItem {
   /** Source-native id (Notion page id, GitHub issue node id, Jira key…). */

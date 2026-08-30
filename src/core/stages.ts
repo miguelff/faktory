@@ -1,4 +1,4 @@
-import type { InboxMessage, Role, Task } from "./types.ts";
+import type { Role, Task } from "./types.ts";
 
 /**
  * Role prompts — what the loop hands a dispatched agent, split in two:
@@ -25,8 +25,6 @@ export interface RolePrompts {
 
 export interface StagePromptInput {
   task: Task;
-  /** Prior handoff annotations, oldest first, injected as context. */
-  handoff: InboxMessage[];
   /** Base `faktory report` invocation, already scoped to this task. */
   reportCommand: string;
   /** Agent-facing `faktory task` commands, already scoped to this config. */
@@ -44,17 +42,6 @@ const HUMAN_LABEL: Record<Role, string> = {
   release: "merging",
   unblock: "unblocking",
 };
-
-function handoffTrail(handoff: InboxMessage[]): string {
-  const notes = handoff.filter((m) => m.note || m.data);
-  if (notes.length === 0) return "There is no prior handoff — you are the first stage.";
-  const lines = notes.map((m) => {
-    const from = m.stage ? `[${m.stage}]` : "[·]";
-    const data = m.data ? ` ${JSON.stringify(m.data)}` : "";
-    return `- ${from} ${m.note ?? ""}${data}`.trimEnd();
-  });
-  return ["Handoff trail from earlier stages (read before you start):", ...lines].join("\n");
-}
 
 /** Roles that may route the task to blocked (the interactive ones talk to the human directly). */
 const CAN_BLOCK: readonly Role[] = ["execute", "review", "release"];
@@ -97,9 +84,10 @@ function contract(role: Role, reportCommand: string, taskCli?: { show: string; l
           "",
           "## Faktory tooling",
           "Your faktory instance's CLI is available in this shell:",
-          `- ${taskCli.show} — this task's state, its papertrail, and the handoff`,
-          "  targets legal from its current lane (an illegal handoff is rejected",
-          "  immediately, listing the legal ones).",
+          `- ${taskCli.show} — this task's state; add \`--json\` for the full detail:`,
+          "  { title, body, trail, meta, handoffs } — the task's content as markdown,",
+          "  its comment feed, its source properties, and the lanes you may hand off",
+          "  to (an illegal handoff is rejected immediately, listing the legal ones).",
           `- ${taskCli.list} — the whole board (id, phase, title, agent).`,
           "- The report command above is the ONLY way to move the task or write to",
           "  its papertrail. Everything else (`task transition`, `config`, `serve`,",
@@ -110,9 +98,27 @@ function contract(role: Role, reportCommand: string, taskCli?: { show: string; l
   ].join("\n");
 }
 
-/** The concrete task, shared by every kickoff message. */
-function taskHeader(verb: string, task: Task): string[] {
-  return [`# ${verb} task #${task.id}: ${task.title}`, `Source: ${task.url}`, ""];
+/**
+ * The concrete task, shared by every kickoff message: the reference (id) and
+ * the fetch instruction — details are pulled, never inlined, so the agent
+ * always reads the current state of the source.
+ */
+function taskHeader(verb: string, input: StagePromptInput): string[] {
+  const { task } = input;
+  const show = input.taskCli?.show ?? `faktory task show ${task.id}`;
+  return [
+    `# ${verb} task #${task.id}: ${task.title}`,
+    "",
+    "First, fetch the full task as JSON:",
+    "",
+    `    ${show} --json`,
+    "",
+    "It carries `title`, `body` (the task's content as markdown), `trail` (the",
+    "comment feed — prior handoffs and human comments, oldest first), `meta`",
+    "(source-native properties), and `handoffs` (the lanes you may hand off to).",
+    "Read all of it before you start.",
+    "",
+  ];
 }
 
 const SYSTEM: Record<Role, (reportCommand: string, taskCli?: { show: string; list: string }) => string> = {
@@ -209,29 +215,23 @@ const SYSTEM: Record<Role, (reportCommand: string, taskCli?: { show: string; lis
 const KICKOFF: Record<Role, (input: StagePromptInput) => string> = {
   shape: (input) =>
     [
-      ...taskHeader("Shape", input.task),
-      handoffTrail(input.handoff),
-      "",
-      "Start the shaping session: restate the intent, ground it in the codebase,",
-      "then open with your questions for the user.",
+      ...taskHeader("Shape", input),
+      "Start the shaping session: restate the intent (from the task's body),",
+      "ground it in the codebase, then open with your questions for the user.",
     ].join("\n"),
 
   execute: (input) =>
-    [...taskHeader("Execute", input.task), handoffTrail(input.handoff), "", "Implement the shaped spec above."].join("\n"),
+    [...taskHeader("Execute", input), "Implement the shaped spec (the last shape handoff in the trail)."].join("\n"),
 
-  review: (input) =>
-    [...taskHeader("Blind-review", input.task), handoffTrail(input.handoff), "", "Review the change now."].join("\n"),
+  review: (input) => [...taskHeader("Blind-review", input), "Review the change now."].join("\n"),
 
-  release: (input) =>
-    [...taskHeader("Merge & release", input.task), handoffTrail(input.handoff), "", "Land the change now."].join("\n"),
+  release: (input) => [...taskHeader("Merge & release", input), "Land the change now."].join("\n"),
 
   unblock: (input) =>
     [
-      ...taskHeader("Unblock", input.task),
-      `Why it is blocked: ${input.reason ?? "(no reason recorded — check the handoff trail and the feed)"}`,
+      ...taskHeader("Unblock", input),
+      `Why it is blocked: ${input.reason ?? "(no reason recorded — check the task's trail)"}`,
       ...(input.cameFrom ? [`Lane it was in: ${input.cameFrom}`] : []),
-      "",
-      handoffTrail(input.handoff),
       "",
       "Open the session by explaining the blocker to the human and what would",
       "resolve it.",

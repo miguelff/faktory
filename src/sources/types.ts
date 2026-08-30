@@ -1,4 +1,4 @@
-import type { WorkItem } from "../core/types.ts";
+import type { WorkItem, WorkItemDetails } from "../core/types.ts";
 
 /**
  * The WorkSource port. Faktory's engine only ever talks to this interface;
@@ -18,6 +18,13 @@ export interface WorkSource {
   listCandidates(): Promise<WorkItem[]>;
 
   getItem(itemId: string): Promise<WorkItem | null>;
+
+  /**
+   * Full detail of one item: title, body as markdown, the comment trail
+   * (oldest first), and source-native meta properties. Backs
+   * `faktory task show <id> --json`, the way agents read their task.
+   */
+  details(itemId: string): Promise<WorkItemDetails>;
 
   /**
    * Claim ownership of an item (CAS): stamp faktory_owned_by/_owned_at only

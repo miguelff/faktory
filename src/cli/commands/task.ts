@@ -23,7 +23,10 @@ export function registerTask(program: Command): void {
   withConfigOption(withListOptions(task.command("list").alias("ls").description("list tasks"))).action(listAction);
 
   withConfigOption(
-    task.command("show <id>").description("one task: state, legal handoff targets, papertrail"),
+    task
+      .command("show <id>")
+      .description("one task: state, legal handoff targets, papertrail")
+      .option("--json", "full detail as JSON — { id, phase, handoffs, title, body, trail, meta } fetched from the source"),
   ).action(showAction);
 
   withConfigOption(
@@ -74,12 +77,27 @@ function listAction(opts: { config?: string; instance?: string; phase?: string }
   }
 }
 
-function showAction(idRaw: string, opts: { config?: string; instance?: string }): void {
+async function showAction(idRaw: string, opts: { config?: string; instance?: string; json?: boolean }): Promise<void> {
   const ctx = requireInstance(selectedConfig(opts));
   const tasks = new TaskStore(ctx.db);
   const t = tasks.byId(Number(idRaw));
   if (!t) throw new Error(`task ${idRaw} not found`);
   const handoffs = PHASES.filter((p) => canHandoff(t.phase, p));
+  if (opts.json) {
+    // The full task, source of truth included: title/body/trail/meta come from
+    // the datasource (for Notion: page title, page blocks as markdown, the
+    // comment feed, and the non-faktory page properties).
+    const engine = buildEngine(ctx);
+    const details = await engine.source.details(t.itemId);
+    console.log(
+      JSON.stringify(
+        { id: t.id, phase: t.phase, handoffs, url: t.url, branch: t.branch, pr: t.prUrl, ...details },
+        null,
+        2,
+      ),
+    );
+    return;
+  }
   console.log(`#${t.id} ${t.title}`);
   console.log(`phase     ${t.phase}${isWorking(t) ? ` (being worked by ${t.agentName})` : ""}`);
   console.log(`url       ${t.url}`);
