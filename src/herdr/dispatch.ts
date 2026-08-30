@@ -1,4 +1,7 @@
 import { execFile } from "node:child_process";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { promisify } from "node:util";
 import { setTimeout as sleep } from "node:timers/promises";
 import type { HerdrClient } from "./client.ts";
@@ -71,18 +74,29 @@ async function waitForIdleShell(herdr: HerdrClient, paneId: string, timeoutMs = 
   throw new Error(`pane ${paneId} did not reach an idle shell within ${timeoutMs / 1000}s`);
 }
 
-/** Start an agent, retrying through the transient `agent_pane_busy` window. */
 /**
- * Harnesses that accept a system prompt on their command line (appended to
- * their own, so AGENTS.md and the coding baseline stay intact). The role's
- * standing orders go there — they survive context compaction. Other kinds get
- * the system text prepended to the kickoff message instead.
+ * Harnesses whose system prompt can be extended from a FILE on their command
+ * line (appended to their own, so AGENTS.md and the coding baseline stay
+ * intact). The role's standing orders go there — they survive context
+ * compaction. It must be a file: herdr refuses agent arguments it cannot
+ * encode safely for the pane's shell, and the standing orders are multiline —
+ * only a path travels safely. Other kinds get the system text prepended to
+ * the kickoff message instead.
  */
-const SYSTEM_PROMPT_FLAG: Readonly<Record<string, string>> = {
-  pi: "--append-system-prompt",
-  claude: "--append-system-prompt",
+const SYSTEM_PROMPT_FILE_FLAG: Readonly<Record<string, string>> = {
+  pi: "--append-system-prompt", // "Append text or file contents to the system prompt"
 };
 
+/** Write the standing orders where the agent's flag can read them (stable per agent). */
+function writeSystemPromptFile(agentName: string, text: string): string {
+  const dir = join(tmpdir(), "faktory-prompts");
+  mkdirSync(dir, { recursive: true });
+  const path = join(dir, `${agentName}.system.md`);
+  writeFileSync(path, text);
+  return path;
+}
+
+/** Start an agent, retrying through the transient `agent_pane_busy` window. */
 async function startAgentWithRetry(
   agentName: string,
   agentKind: string,
@@ -208,8 +222,8 @@ export async function dispatchStage(
   const paneId = await openStageTab(herdr, workspaceId, stage, opts.repoCwd, rootPaneId);
   const agentName = stageAgentName(prefix, task.id, stage);
   await waitForIdleShell(herdr, paneId);
-  const flag = SYSTEM_PROMPT_FLAG[opts.agentKind];
-  await startAgentWithRetry(agentName, opts.agentKind, paneId, flag ? [flag, prompts.system] : []);
+  const flag = SYSTEM_PROMPT_FILE_FLAG[opts.agentKind];
+  await startAgentWithRetry(agentName, opts.agentKind, paneId, flag ? [flag, writeSystemPromptFile(agentName, prompts.system)] : []);
   const kickoff = flag ? prompts.kickoff : `${prompts.system}\n\n${prompts.kickoff}`;
   await herdr.request("agent.prompt", { target: agentName, text: kickoff });
   return { workspaceId, paneId, agentName, branch };

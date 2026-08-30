@@ -125,10 +125,10 @@ test("first stage creates the task space (worktree) and reuses its root tab", as
   assert.ok(!requests.some((r) => r.method === "tab.create"), "first stage reuses the root tab");
 
   const calls = herdrCalls();
-  assert.ok(
-    calls.some((c) => c.includes("agent start faktory-fk-t3-shape") && c.includes("--append-system-prompt SYSTEM-ORDERS")),
-    "pi gets the role's standing orders as an appended system prompt",
-  );
+  const start = calls.find((c) => c.includes("agent start faktory-fk-t3-shape"))!;
+  const path = start.match(/--append-system-prompt (\S+)/)?.[1];
+  assert.ok(path, "pi gets the standing orders via a file (multiline args cannot cross the shell)");
+  assert.equal(readFileSync(path!, "utf8"), "SYSTEM-ORDERS", "the file carries the standing orders");
   assert.ok(requests.some((r) => r.method === "agent.prompt" && r.params.text === "KICKOFF"));
 });
 
