@@ -80,7 +80,6 @@ function task(overrides: Partial<Task> = {}): Task {
     agentName: null,
     stage: null,
     dispatchedAt: null,
-    attentionAt: null,
     branch: null,
     prUrl: null,
     error: null,
@@ -151,16 +150,6 @@ test("a later stage opens a new tab in the existing task space", async () => {
   assert.equal(res.agentName, "faktory-fk-t3-execute");
 });
 
-test("agentStatus maps herdr agent state, and absent when the agent is gone", async () => {
-  handler = (method) => {
-    if (method === "agent.list")
-      return { agents: [{ agent_name: "faktory-fk-t3-shape", status: "working" }] };
-    return {};
-  };
-  const d = new HerdrDispatcher(client, "faktory-fk", { agentKind: "pi", repoCwd: "/repo" });
-  assert.equal(await d.agentStatus("faktory-fk-t3-shape"), "working");
-  assert.equal(await d.agentStatus("nobody"), "absent");
-});
 
 test("archiving a task closes its herdr space", async () => {
   handler = () => ({});

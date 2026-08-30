@@ -18,7 +18,6 @@ function rowToTask(r: Record<string, unknown>): Task {
     agentName: r.agent_name as string | null,
     stage: (r.stage as Role | null) ?? null,
     dispatchedAt: (r.dispatched_at as string | null) ?? null,
-    attentionAt: (r.attention_at as string | null) ?? null,
     branch: r.branch as string | null,
     prUrl: r.pr_url as string | null,
     error: r.error as string | null,
@@ -110,7 +109,6 @@ export class TaskStore {
            agent_name    = ?,
            stage         = ?,
            dispatched_at = ?,
-           attention_at  = ?,
            branch        = ?,
            pr_url        = ?,
            error         = ?,
@@ -124,7 +122,6 @@ export class TaskStore {
         keep("agentName", task.agentName),
         keep("stage", task.stage),
         keep("dispatchedAt", task.dispatchedAt),
-        keep("attentionAt", task.attentionAt),
         keep("branch", task.branch),
         keep("prUrl", task.prUrl),
         patch.error ?? null,
@@ -164,7 +161,7 @@ export class TaskStore {
       .prepare(
         `UPDATE tasks SET
            workspace_id = ?, pane_id = ?, agent_name = ?, stage = ?, dispatched_at = ?,
-           attention_at = ?, branch = ?, pr_url = ?, error = ?,
+           branch = ?, pr_url = ?, error = ?,
            updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
          WHERE id = ?`,
       )
@@ -174,7 +171,6 @@ export class TaskStore {
         keep("agentName", task.agentName),
         keep("stage", task.stage),
         keep("dispatchedAt", task.dispatchedAt),
-        keep("attentionAt", task.attentionAt),
         keep("branch", task.branch),
         keep("prUrl", task.prUrl),
         "error" in patch ? (patch.error ?? null) : (task.error ?? null),
@@ -237,7 +233,6 @@ export interface TaskPatch {
   agentName: string | null;
   stage: Role | null;
   dispatchedAt: string | null;
-  attentionAt: string | null;
   branch: string | null;
   prUrl: string | null;
   error: string | null;

@@ -23,7 +23,6 @@ import {
 } from "../context.ts";
 import { selectedConfig, withConfigOption } from "../options.ts";
 
-const DEFAULT_STALL_MS = 5 * 60_000;
 const DEFAULT_TICK_MS = 5_000;
 
 /**
@@ -78,7 +77,6 @@ interface ServeOpts {
 /** Build the loop config that binds agents' `faktory report` command. */
 function loopConfig(engine: Engine, slug: string, port: number) {
   return {
-    stallTimeoutMs: DEFAULT_STALL_MS,
     reportCommandFor: (task: Task, role: Role, agentName: string) =>
       `${FAKTORY_BIN} report ${task.id} --config ${slug} --port ${port} --sender ${agentName} --stage ${role}`,
   };

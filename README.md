@@ -150,9 +150,8 @@ The `serve` picker can also delete a config when several exist.
 
 - **Notion** is the remote board: `faktory_status` mirrors every phase.
 - **HTTP API**: `docs/API.md` — thin board/feed + the inbox agents report to.
-- **TUI kanban**: cards show `●` working / `○` waiting / `?` the agent is
-  waiting on you (jump into its session with `w`, open the datasource item with
-  `o`). h/l move between columns, j/k between cards, enter for detail +
+- **TUI kanban**: cards show `●` working / `○` waiting (jump into a task's
+  session with `w`, open its datasource item with `o`). h/l move between columns, j/k between cards, enter for detail +
   audit/inbox history, `t` to transition, SHIFT+letter to force-repair, `u`
   unblock, `x` release a backlog task's claim, `d` toggle Done, `a` toggle
   Archived, `s` sync, `q` quit.

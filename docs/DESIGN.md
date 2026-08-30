@@ -12,7 +12,7 @@ itself, and manages herdr workspaces/panes/agents through herdr's socket API.
 │  │  Notion   │  listCandidates   │  SQLite (config + state + inbox)│    │
 │  │  (Jira)   │◀─────────────────▶│  Lifecycle state machine       │     │
 │  │  (GitHub) │  setStatus/tags   │  ENGINE LOOP (deterministic):   │    │
-│  └───────────┘                   │   sync · drain inbox · reconcile│    │
+│  └───────────┘                   │   sync · drain inbox · dispatch │    │
 │        ▲                          │   · handoffs · dispatch/role   │     │
 │        │                          └───────────────────────────────┘     │
 │        │                              │            ▲                    │
@@ -39,12 +39,11 @@ orchestrator agent is gone: a programmatic **engine loop** runs inside the
 2. **drains the inbox** — validates each agent message (origin + transition
    legality) and serially applies it (advance a stage, hand off to another
    lane, annotate, block);
-3. **reconciles** herdr agent state as a safety net (blocked → needs human;
-   quiet-without-a-message → nudge once, then flag as stalled);
-4. **dispatches** — a stage agent to any lane task that is waiting (not yet
+3. **dispatches** — a stage agent to any lane task that is waiting (not yet
    being worked), and an interactive unblocking session to any blocked task
    without one. The loop never promotes from `backlog`: that move is a
-   human's.
+   human's, and it never second-guesses a running session — herdr itself
+   surfaces an agent that is asking for input.
 
 Agents are like goroutines: independent workers with no access to shared state.
 The **inbox** is the channel; the loop is the coordinator. Agents never mutate
@@ -103,7 +102,7 @@ interactive unblocking session seeded with why it is blocked.
 | `review`     | actionable lane: a blind-review agent judges the change       |
 | `release`    | review passed / PR ready — awaiting merge or deploy           |
 | `done`       | terminal success                                             |
-| `blocked`    | out-of-band: needs a human (agent asked, herdr-blocked, stall)|
+| `blocked`    | out-of-band: needs a human (an agent handed off to it)        |
 | `archived`   | out-of-band: removed from the board (revivable to `backlog`)  |
 
 The four **actionable lanes** (`shape, execute, review, release`) are the
@@ -185,16 +184,13 @@ per pipeline stage** inside it; dispatch = `worktree.create` (first stage) →
 Archiving a task closes its space (`workspace.close`), taking its conversations
 with it.
 
-**Attention.** herdr models agent status as `idle | working | blocked | done |
-unknown`. The loop reconciles this against the inbox: herdr-`blocked` or
-`absent` on a pipeline lane → the task is blocked (needs a human) regardless of
-the inbox, while a dead *interactive* session (shape, unblock) is detached and
-reopened with the trail; `idle`/`done` with no message → nudge once, then only
-*flag* it in the feed for human attention (interactive agents legitimately sit
-idle waiting on the human, so a live session is never torn down). Completion
-is only ever declared by a terminal `handoff` inbox message from the current dispatched
-agent — silence is never read as success, and unsigned/mismatched or
-stray-duplicate messages are rejected.
+**Attention.** herdr owns the "agent needs you" UX: it surfaces an agent that
+is asking for input or blocked on a permission prompt, and every faktory
+session is an interactive conversation the human can join in its tab (`w` from
+the board). The loop never nudges, flags, or tears down a quiet session, and
+never declares an agent dead. A task moves only on a terminal `handoff` inbox
+message from the current dispatched agent — silence is never read as success,
+and unsigned/mismatched or stray-duplicate messages are rejected.
 
 ## Installer & onboarding
 

@@ -4,7 +4,7 @@ Localhost JSON control plane, served by `faktory serve` (default
 `http://127.0.0.1:4600`). It is a thin, read-mostly surface: the board/feed for
 viewers, and the **inbox** endpoint that dispatched agents use to talk back to
 the engine loop (`faktory report` wraps it). All lifecycle policy — dispatch,
-transitions, handoffs, stall handling — lives in the in-process engine loop
+transitions, handoffs, dispatch retries — lives in the in-process engine loop
 (`src/core/loop.ts`), not here. The only writes callers make are inbox messages
 and manual repair transitions.
 
@@ -52,19 +52,13 @@ faktory report <id> --config <slug> --sender <agent> --stage <stage> \
   session seeded with the note); blocked → its lane on resolution. Human-only
   moves (backlog → shape, done → archived) are rejected, and `shape` cannot
   hand off to blocked — it is already an interactive session with the human.
-- `note` — a papertrail annotation with no transition. An interactive session
-  (shape, unblock) that asks the human something and goes quiet first sends a
-  note with `data.awaiting = "human"`: the board flags the card (`?`) and the
-  human gets a herdr notification; any later message from the agent clears the
-  flag.
+- `note` — a papertrail annotation with no transition.
 
 A task only ever advances on a `handoff` from its *current dispatched* agent
-(unsigned/mismatched messages are rejected). A quiet
-agent is reconciled against herdr state: herdr-`blocked` or `absent` → the task
-is `blocked` for a human; `idle`/`done` with no message → nudged once, then only
-*flagged* in the feed (an actionable lane like `shape` is a live human
-conversation, so the session is never torn down on silence). Silence is never
-read as success.
+(unsigned/mismatched messages are rejected) — never on silence. Every session
+is interactive: agents ask the human directly in their herdr tab, and herdr
+itself surfaces an agent that is waiting for input, so the loop never nudges,
+flags, or tears down a quiet session.
 
 ## Handoff papertrail
 

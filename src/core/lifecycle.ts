@@ -60,18 +60,6 @@ export function roleFor(phase: Phase): Role | null {
 }
 
 /**
- * Interactive roles hold a live conversation with the human in their tab: they
- * never move without the human's word, so the loop never routes them to
- * blocked — a dead session is detached (a fresh one opens with the trail) and
- * a live-but-quiet one is only ever nudged/flagged.
- */
-export const INTERACTIVE_ROLES: readonly Role[] = ["shape", "unblock"];
-
-export function isInteractive(role: Role): boolean {
-  return INTERACTIVE_ROLES.includes(role);
-}
-
-/**
  * Is an agent actively working this task? A lane task is either *being worked*
  * (an agent is dispatched) or *waiting* in the loop's inbox. This is the
  * explicit signal the loop and the board use — never inferred from silence.

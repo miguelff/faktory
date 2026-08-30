@@ -366,7 +366,7 @@ export class Tui {
     for (const e of this.feed) lines.push("  " + this.feedLine(e, cols - 4));
     for (let i = this.feed.length; i < FEED_LINES; i++) lines.push("");
     lines.push(
-      C.dim(" h/l column · j/k card (? = your turn) · enter detail · t transition · u unblock · x unclaim · w session · o url · s sync · d done · a archived · q quit"),
+      C.dim(" h/l column · j/k card · enter detail · t transition · u unblock · x unclaim · w session · o url · s sync · d done · a archived · q quit"),
     );
   }
 
@@ -375,13 +375,9 @@ export class Tui {
     const color = PHASE_COLOR[phase];
     const out: string[] = [];
     const tasks = this.column(phase);
-    // In an actionable lane, show how many cards are actively being worked
-    // and how many are waiting on the human.
+    // In an actionable lane, show how many cards are actively being worked.
     const working = isStage(phase) ? tasks.filter(isWorking).length : 0;
-    const waitingOnYou = tasks.filter((t) => t.attentionAt).length;
-    const header = isStage(phase)
-      ? `${PHASE_LABEL[phase]} ${tasks.length} · ${working}●${waitingOnYou ? ` ${waitingOnYou}?` : ""}`
-      : `${PHASE_LABEL[phase]} ${tasks.length}`;
+    const header = isStage(phase) ? `${PHASE_LABEL[phase]} ${tasks.length} · ${working}●` : `${PHASE_LABEL[phase]} ${tasks.length}`;
     out.push((isSelectedCol ? C.bold : color)(pad(header, COL_WIDTH)));
     const cardRows = height - 1;
     for (let i = 0; i < cardRows; i++) {
@@ -390,8 +386,8 @@ export class Tui {
         out.push(" ".repeat(COL_WIDTH));
         continue;
       }
-      // ● working · ○ waiting for the loop · ? the agent is waiting on YOU.
-      const mark = t.attentionAt ? "? " : isStage(phase) ? (isWorking(t) ? "● " : "○ ") : "";
+      // ● = an agent is working this card; ○ = waiting in the lane for the loop.
+      const mark = isStage(phase) ? (isWorking(t) ? "● " : "○ ") : "";
       const text = pad(`${mark}#${t.id} ${t.title}`, COL_WIDTH);
       const selected = isSelectedCol && i === this.row;
       out.push(selected ? C.inv(text) : color(text));
@@ -426,7 +422,6 @@ export class Tui {
     const activity = isStage(t.phase) ? (isWorking(t) ? C.warn("● working") : C.dim("○ waiting")) : "";
     lines.push(`   phase     ${color(PHASE_LABEL[t.phase])}  ${activity}`);
     if (t.dispatchedAt) lines.push(`   working   since ${t.dispatchedAt.slice(11, 19)} (agent ${t.agentName ?? "—"})`);
-    if (t.attentionAt) lines.push(`   waiting   ${C.err(`on you since ${t.attentionAt.slice(11, 19)} — press w to answer`)}`);
     lines.push(`   url       ${C.info(t.url)}`);
     lines.push(`   priority  ${t.priority ?? "—"}`);
     lines.push(`   herdr     ${t.workspaceId ?? "—"} / ${t.paneId ?? "—"} / ${t.agentName ?? "—"}`);

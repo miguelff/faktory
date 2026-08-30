@@ -17,7 +17,6 @@ function task(overrides: Partial<Task> = {}): Task {
     agentName: null,
     stage: null,
     dispatchedAt: null,
-    attentionAt: null,
     branch: null,
     prUrl: null,
     error: null,
@@ -35,7 +34,7 @@ test("every role prompt states the task, and the exact report contract", () => {
     assert.match(p, /Task #7: Add a widget/);
     assert.match(p, /faktory report 7 --config fk/, "embeds the report command");
     assert.match(p, /handoff\|note/, "requires a typed terminal message");
-    assert.match(p, /Silence is treated as a stall/, "forbids going quiet");
+    assert.match(p, /NEVER moves on silence/, "the task stays until a handoff");
   }
 });
 

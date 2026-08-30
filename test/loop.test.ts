@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { openDb } from "../src/core/db.ts";
 import { Engine } from "../src/core/engine.ts";
-import { Loop, type AgentStatus, type Dispatcher, type StageDispatchResult } from "../src/core/loop.ts";
+import { Loop, type Dispatcher, type StageDispatchResult } from "../src/core/loop.ts";
 import type { InboxType, Role, Task, WorkItem } from "../src/core/types.ts";
 import type { WorkSource } from "../src/sources/types.ts";
 
@@ -35,30 +35,17 @@ class FakeSource implements WorkSource {
 
 class FakeDispatcher implements Dispatcher {
   dispatched: Array<{ taskId: number; stage: Role; agentName: string }> = [];
-  status = new Map<string, AgentStatus>();
   archived: number[] = [];
-  nudges: string[] = [];
-  notifications: Array<{ title: string; body: string }> = [];
   agentNameFor(taskId: number, role: Role): string {
     return `a-t${taskId}-${role}`;
   }
   async dispatchStage(task: Task, role: Role, _prompt: string): Promise<StageDispatchResult> {
     const agentName = this.agentNameFor(task.id, role);
     this.dispatched.push({ taskId: task.id, stage: role, agentName });
-    this.status.set(agentName, "working");
     return { workspaceId: `ws${task.id}`, paneId: `ws${task.id}:p-${role}`, agentName, branch: `b/${task.id}` };
   }
   async archiveTaskSpace(task: Task) {
     this.archived.push(task.id);
-  }
-  async agentStatus(agentName: string): Promise<AgentStatus> {
-    return this.status.get(agentName) ?? "working";
-  }
-  async nudge(agentName: string) {
-    this.nudges.push(agentName);
-  }
-  async notify(title: string, body: string) {
-    this.notifications.push({ title, body });
   }
 }
 
@@ -76,7 +63,6 @@ function harness(now: () => number = Date.now) {
     engine,
     dispatcher,
     {
-      stallTimeoutMs: 1000,
       reportCommandFor: (t, s, a) => `report ${t.id} ${s} ${a}`,
     },
     now,
@@ -261,78 +247,6 @@ test("a message from the wrong sender is rejected, not applied", async () => {
   assert.match(engine.inbox.forTask(1).at(-1)!.outcome!, /rejected:origin/);
 });
 
-test("completion is never inferred from silence; a quiet agent is nudged then flagged", async () => {
-  let clock = 0;
-  const h = harness(() => clock);
-  const { engine, dispatcher, loop } = h;
-  await seedInShape(h, [item("n1", "One", 5)]);
-  const agent = engine.tasks.byId(1)!.agentName!;
-  // Agent goes idle without sending a completed message.
-  dispatcher.status.set(agent, "idle");
-  await loop.tick(); // first quiet sighting → nudge, still in lane
-  assert.deepEqual(dispatcher.nudges, [agent]);
-  assert.equal(engine.tasks.byId(1)!.phase, "shape", "never advanced on silence");
-
-  clock += 2000; // exceed stallTimeoutMs
-  await loop.tick();
-  // Flagged for a human via the feed, but the (possibly interactive) session is
-  // left intact — silence is never read as completion, nor as a hard failure.
-  assert.equal(engine.tasks.byId(1)!.phase, "shape");
-  assert.ok(
-    engine.feed.recent(20).some((e) => e.kind === "stall" && /may need attention/.test(e.message)),
-    "a stall warning is surfaced for human attention",
-  );
-});
-
-test("herdr-blocked on an execute task surfaces as blocked; on shape it stays in its lane", async () => {
-  const h = harness();
-  const { engine, dispatcher, loop } = h;
-  let t = await seedInShape(h, [item("n1", "One", 5)]);
-  dispatcher.status.set(t.agentName!, "blocked");
-  await loop.tick();
-  t = engine.tasks.byId(1)!;
-  assert.equal(t.phase, "shape", "shaping never blocks");
-  assert.ok(engine.feed.recent(10).some((e) => e.kind === "stall" && /answer in its tab/.test(e.message)));
-
-  dispatcher.status.set(t.agentName!, "working");
-  handoff(engine, t, "execute", "shaped");
-  await loop.tick(); // → execute
-  t = engine.tasks.byId(1)!;
-  dispatcher.status.set(t.agentName!, "blocked");
-  await loop.tick();
-  assert.equal(engine.tasks.byId(1)!.phase, "blocked");
-});
-
-test("a vanished (absent) execute agent is a hard stall → blocked", async () => {
-  const h = harness();
-  const { engine, dispatcher, loop } = h;
-  let t = await seedInShape(h, [item("n1", "One", 5)]);
-  handoff(engine, t, "execute", "shaped");
-  await loop.tick();
-  t = engine.tasks.byId(1)!;
-  dispatcher.status.set(t.agentName!, "absent");
-  await loop.tick();
-  assert.equal(engine.tasks.byId(1)!.phase, "blocked");
-});
-
-test("a vanished unblocking session is reopened on the next pass", async () => {
-  const h = harness();
-  const { engine, dispatcher, loop } = h;
-  let t = await seedInShape(h, [item("n1", "One", 5)]);
-  handoff(engine, t, "execute", "shaped");
-  await loop.tick();
-  report(engine, engine.tasks.byId(1)!, "handoff", "stuck", { to: "blocked" });
-  await loop.tick();
-  const firstSession = engine.tasks.byId(1)!.agentName!;
-  assert.equal(firstSession, "a-t1-unblock");
-  dispatcher.status.set(firstSession, "absent");
-  await loop.tick();
-  t = engine.tasks.byId(1)!;
-  assert.equal(t.phase, "blocked", "still blocked");
-  assert.equal(t.agentName, "a-t1-unblock", "a fresh unblocking session was opened");
-  assert.equal(dispatcher.dispatched.filter((d) => d.stage === "unblock").length, 2);
-});
-
 test("a duplicate handoff does not walk the task through empty lanes", async () => {
   const h = harness();
   const { engine, loop } = h;
@@ -429,47 +343,36 @@ test("a human can release the claim on a backlog task; returning to backlog neve
   await assert.rejects(() => engine.unclaim(1), /only a backlog task/);
 });
 
-test("an awaiting-human note flags the task and notifies the human", async () => {
+test("a quiet agent is left alone — the loop never nudges, blocks, or re-dispatches it", async () => {
   const h = harness();
   const { engine, dispatcher, loop } = h;
   const t = await seedInShape(h, [item("n1", "One", 5)]);
-  report(engine, t, "note", "Which database should this read from?", { awaiting: "human" });
-  await loop.tick();
-  assert.notEqual(engine.tasks.byId(1)!.attentionAt, null, "flagged as waiting on the human");
-  assert.ok(
-    dispatcher.notifications.some((n) => n.title.includes("#1") && /Which database/.test(n.body)),
-    "the human is notified",
-  );
-  assert.ok(engine.feed.recent(10).some((e) => /waiting on you/.test(e.message)));
+  // Many passes with no message from the agent: nothing changes. herdr owns
+  // the "agent is asking for input" UX; the loop owns nothing but handoffs.
+  for (let i = 0; i < 5; i++) await loop.tick();
+  const after = engine.tasks.byId(1)!;
+  assert.equal(after.phase, "shape");
+  assert.equal(after.agentName, t.agentName, "same session, untouched");
+  assert.equal(dispatcher.dispatched.length, 1, "never re-dispatched");
 });
 
-test("any later message from the agent clears the your-turn flag", async () => {
+test("a failed dispatch is surfaced and retried on the next pass, never blocking the task", async () => {
   const h = harness();
-  const { engine, loop } = h;
-  const t = await seedInShape(h, [item("n1", "One", 5)]);
-  report(engine, t, "note", "waiting", { awaiting: "human" });
+  const { engine, source, dispatcher, loop } = h;
+  source.items = [item("n1", "One", 5)];
   await loop.tick();
-  assert.notEqual(engine.tasks.byId(1)!.attentionAt, null);
-  report(engine, engine.tasks.byId(1)!, "note", "resuming with the answer");
+  const real = dispatcher.dispatchStage.bind(dispatcher);
+  dispatcher.dispatchStage = async () => {
+    throw new Error("herdr down");
+  };
+  await engine.transition(1, "shape", "human");
   await loop.tick();
-  assert.equal(engine.tasks.byId(1)!.attentionAt, null, "a plain note unflags");
-
-  report(engine, engine.tasks.byId(1)!, "note", "one more question", { awaiting: "human" });
+  let t = engine.tasks.byId(1)!;
+  assert.equal(t.phase, "shape", "stays in its lane");
+  assert.equal(t.agentName, null, "still waiting");
+  assert.ok(engine.feed.recent(10).some((e) => /dispatch shape failed \(will retry\)/.test(e.message)));
+  dispatcher.dispatchStage = real;
   await loop.tick();
-  handoff(engine, engine.tasks.byId(1)!, "execute", "signed off");
-  await loop.tick();
-  assert.equal(engine.tasks.byId(1)!.attentionAt, null, "a handoff unflags");
-});
-
-test("a stall warning also notifies the human", async () => {
-  let clock = 0;
-  const h = harness(() => clock);
-  const { engine, dispatcher, loop } = h;
-  await seedInShape(h, [item("n1", "One", 5)]);
-  const agent = engine.tasks.byId(1)!.agentName!;
-  dispatcher.status.set(agent, "idle");
-  await loop.tick(); // nudge
-  clock += 2000;
-  await loop.tick(); // flag + notify
-  assert.ok(dispatcher.notifications.some((n) => /may need attention/.test(n.body)));
+  t = engine.tasks.byId(1)!;
+  assert.equal(t.agentName, "a-t1-shape", "retried once herdr is back");
 });

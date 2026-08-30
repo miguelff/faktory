@@ -76,12 +76,6 @@ export interface Task {
    * up; non-null means an agent is (or was) actively on it.
    */
   dispatchedAt: string | null;
-  /**
-   * Since when the dispatched agent has been waiting on the human ("your
-   * turn"): declared by the agent (a note with data.awaiting = "human"),
-   * cleared as soon as the agent works or reports again.
-   */
-  attentionAt: string | null;
   branch: string | null;
   prUrl: string | null;
   error: string | null;

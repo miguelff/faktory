@@ -160,6 +160,11 @@ const MIGRATIONS: string[] = [
   `
   ALTER TABLE tasks ADD COLUMN attention_at TEXT;
   `,
+  // Migration 6: attention_at is gone — herdr itself surfaces an agent that is
+  // asking for input, so the loop keeps no "your turn" state.
+  `
+  ALTER TABLE tasks DROP COLUMN attention_at;
+  `,
 ];
 
 export function openDb(path: string): DatabaseSync {

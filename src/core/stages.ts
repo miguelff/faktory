@@ -7,9 +7,10 @@ import type { InboxMessage, Role, Task } from "./types.ts";
  * the loop supplies the task, the handoff trail (prior inbox annotations), and
  * the exact `faktory report` command the agent must call to talk back.
  *
- * Every prompt ends with the same contract: the agent MUST send a terminal
- * `handoff` message before it goes quiet. The loop never infers completion
- * from silence — a quiet agent with no message is a stall, not a success.
+ * Every prompt ends with the same contract: the task moves only on a terminal
+ * `handoff` message — never inferred. Sessions are interactive at every stage:
+ * agents ask the human directly in their tab (herdr surfaces the question),
+ * and the loop never second-guesses a quiet session.
  */
 
 export interface StagePromptInput {
@@ -68,22 +69,17 @@ function contract(role: Role, reportCommand: string): string {
     "  pointers) in `--note` and structured fields in `--data`. Every handoff is",
     "  mirrored to the source as a `<handoff from to>` comment — the papertrail.",
     ...(next ? [`- When your work here is done, send exactly one handoff with \`--to ${next}\`.`] : []),
+    "- This is an interactive session: ask the human directly in this chat when",
+    "  you need a decision.",
     ...(CAN_BLOCK.includes(role)
       ? [
-          "- If you hit something only a human can resolve, hand off with `--to blocked`",
-          "  and a note describing exactly what is needed. The loop opens an",
-          "  interactive unblocking session for the human.",
+          "- If you hit something only a human can resolve and this session cannot",
+          "  continue, hand off with `--to blocked` and a note describing exactly",
+          "  what is needed — the loop opens an unblocking session for the human.",
         ]
-      : [
-          "- You are in an interactive session: ask the human directly in this chat",
-          "  when you need a decision. Whenever you ask and go quiet waiting for the",
-          "  answer, first send a `note` with `--data '{\"awaiting\":\"human\"}'` and the",
-          "  question as `--note` — the board flags the task and the human gets a",
-          "  notification. Any later message clears the flag.",
-        ]),
+      : []),
     "- A `note` message annotates the papertrail without moving the task.",
-    "- Do NOT go quiet without sending one of these. Silence is treated as a stall,",
-    "  never as success.",
+    "- The task NEVER moves on silence — it stays with you until you hand it off.",
     `(role: ${role} — ${HUMAN_LABEL[role]})`,
   ].join("\n");
 }

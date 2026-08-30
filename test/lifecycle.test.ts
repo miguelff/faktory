@@ -5,7 +5,6 @@ import {
   canTransition,
   canHandoff,
   roleFor,
-  isInteractive,
   statusForPhase,
   phaseForStatus,
   DISCOVERABLE,
@@ -55,8 +54,6 @@ test("every phase's role matches the spec", () => {
   assert.equal(roleFor("blocked"), "unblock");
   assert.equal(roleFor("done"), null);
   assert.equal(roleFor("archived"), null);
-  assert.ok(isInteractive("shape") && isInteractive("unblock"), "shape and unblock talk to the human");
-  assert.ok(!isInteractive("execute") && !isInteractive("review") && !isInteractive("release"));
 });
 
 test("isStage identifies the actionable lanes only", () => {
