@@ -119,16 +119,44 @@ async function ensureTaskSpace(
 ): Promise<{ workspaceId: string; branch: string; rootPaneId?: string }> {
   const branch = task.branch ?? branchNameFor(task, prefix);
   if (task.workspaceId) return { workspaceId: task.workspaceId, branch };
-  const created = await herdr.request<any>("worktree.create", {
+  const params = {
     ...(opts.repoWorkspaceId ? { workspace_id: opts.repoWorkspaceId } : {}),
     ...(opts.repoCwd ? { cwd: opts.repoCwd } : {}),
     branch,
     label: taskSpaceLabel(prefix, task),
     focus: false,
-  });
+  };
+  // The git worktree outlives the herdr session: after a session restart (or a
+  // repaired stale assignment) the branch's worktree is still on disk, and
+  // `worktree.create` fails on it. A task that already has a branch recorded
+  // was provisioned before — reattach first; fall back to reattaching when a
+  // fresh create trips over leftovers on disk.
+  const created = task.branch
+    ? await reattachOrCreateWorktree(herdr, params)
+    : await createOrReattachWorktree(herdr, params);
   const workspaceId = idOf(created.workspace)!;
   const rootPaneId = idOf(created.root_pane);
   return { workspaceId, branch, rootPaneId };
+}
+
+async function reattachOrCreateWorktree(herdr: HerdrClient, params: Record<string, unknown>): Promise<any> {
+  try {
+    return await herdr.request<any>("worktree.open", params);
+  } catch {
+    return herdr.request<any>("worktree.create", params);
+  }
+}
+
+async function createOrReattachWorktree(herdr: HerdrClient, params: Record<string, unknown>): Promise<any> {
+  try {
+    return await herdr.request<any>("worktree.create", params);
+  } catch (err) {
+    try {
+      return await herdr.request<any>("worktree.open", params);
+    } catch {
+      throw err; // the create failure is the informative one
+    }
+  }
 }
 
 /**

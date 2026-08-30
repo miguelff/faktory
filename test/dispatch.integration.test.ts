@@ -42,7 +42,9 @@ before(async () => {
         if (!line.trim()) continue;
         const msg = JSON.parse(line);
         requests.push({ method: msg.method, params: msg.params });
-        sock.write(JSON.stringify({ id: msg.id, result: handler(msg.method, msg.params) }) + "\n");
+        const out = handler(msg.method, msg.params);
+        if (out && out.__error) sock.write(JSON.stringify({ id: msg.id, error: out.__error }) + "\n");
+        else sock.write(JSON.stringify({ id: msg.id, result: out }) + "\n");
       }
     });
   });
@@ -160,4 +162,63 @@ test("archiving a task closes its herdr space", async () => {
   await d.archiveTaskSpace(task({ workspaceId: "ws3" }));
   const closed = requests.find((r) => r.method === "workspace.close");
   assert.equal(closed?.params.workspace_id, "ws3");
+});
+
+test("a leftover worktree on disk is reattached when worktree.create fails", async () => {
+  handler = (method) => {
+    switch (method) {
+      case "worktree.create":
+        return { __error: { code: "worktree_create_failed", message: "Preparing worktree (checking out)" } };
+      case "worktree.open":
+        return { workspace: { workspace_id: "ws9" }, root_pane: { pane_id: "ws9:p1" } };
+      case "pane.get":
+        return { pane: { pane_id: "ws9:p1", tab_id: "ws9:t1" } };
+      case "pane.process_info":
+        return { process_info: { shell_pid: 1, foreground_processes: [{ pid: 1 }] } };
+      default:
+        return {};
+    }
+  };
+  const d = new HerdrDispatcher(client, "faktory-fk", { agentKind: "pi", repoCwd: "/repo" });
+  const res = await d.dispatchStage(task(), "shape", { system: "S", kickoff: "K" });
+  assert.equal(res.workspaceId, "ws9", "reattached to the existing worktree");
+  const open = requests.find((r) => r.method === "worktree.open")!;
+  assert.equal(open.params.branch, "faktory-fk/3-ship-it");
+});
+
+test("a task with a recorded branch reattaches its worktree without trying create", async () => {
+  handler = (method) => {
+    switch (method) {
+      case "worktree.open":
+        return { workspace: { workspace_id: "ws9" }, root_pane: { pane_id: "ws9:p1" } };
+      case "pane.get":
+        return { pane: { pane_id: "ws9:p1", tab_id: "ws9:t1" } };
+      case "pane.process_info":
+        return { process_info: { shell_pid: 1, foreground_processes: [{ pid: 1 }] } };
+      default:
+        return {};
+    }
+  };
+  const d = new HerdrDispatcher(client, "faktory-fk", { agentKind: "pi", repoCwd: "/repo" });
+  const res = await d.dispatchStage(task({ branch: "faktory-fk/3-ship-it" }), "shape", { system: "S", kickoff: "K" });
+  assert.equal(res.workspaceId, "ws9");
+  assert.ok(!requests.some((r) => r.method === "worktree.create"), "reattach comes first for a known branch");
+});
+
+test("when both create and reattach fail, the create error is the one raised", async () => {
+  handler = (method) => {
+    switch (method) {
+      case "worktree.create":
+        return { __error: { code: "worktree_create_failed", message: "Preparing worktree (checking out)" } };
+      case "worktree.open":
+        return { __error: { code: "not_found", message: "no such worktree" } };
+      default:
+        return {};
+    }
+  };
+  const d = new HerdrDispatcher(client, "faktory-fk", { agentKind: "pi", repoCwd: "/repo" });
+  await assert.rejects(
+    () => d.dispatchStage(task(), "shape", { system: "S", kickoff: "K" }),
+    /worktree_create_failed/,
+  );
 });
