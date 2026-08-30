@@ -153,3 +153,22 @@ export interface FeedEntry {
   actor: string;
   message: string;
 }
+
+/**
+ * A flagged inconsistency in the local error log. These never live in the
+ * datasource: a write-through that failed/exhausted, a lost CAS, or a value the
+ * reconciliation job found to differ remotely vs locally. Open until an
+ * operator resolves it in the TUI.
+ */
+export type ErrorKind = "write-through" | "cas" | "reconcile";
+
+export interface ErrorEntry {
+  id: number;
+  taskId: number | null;
+  at: string;
+  kind: ErrorKind;
+  fingerprint: string | null;
+  message: string;
+  detail: string | null;
+  resolvedAt: string | null;
+}

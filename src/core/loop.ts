@@ -64,11 +64,13 @@ export class Loop {
 
   /** One deterministic pass. Safe to call on an interval. */
   async tick(): Promise<void> {
+    await this.engine.flushOutbox(); // retry any datasource writes still pending
     await this.engine.syncCandidates();
     await this.drainInbox();
     await this.repairAssignments();
     await this.reapArchived();
     await this.maintainDispatch();
+    await this.engine.reconcile(); // audit the datasource against the snapshot
   }
 
   // --- inbox: the one channel agents use to talk back -----------------------
@@ -137,28 +139,27 @@ export class Loop {
 
   /**
    * Mirror an applied message to the datasource as a `<handoff from to>` marker
-   * comment — the task's papertrail. Best-effort: the inbox row already
-   * preserves the trail locally.
+   * comment — the task's papertrail. Written through the outbox (durable +
+   * retried): a failed comment write is queued and flagged in the error log,
+   * never silently dropped. The feed annotation is appended once the write
+   * acknowledges (inside engine.comment's local effect).
    */
   private async mirror(task: Task, msg: InboxMessage, to: Phase | null): Promise<void> {
     if (!msg.note && !msg.data && !to) return;
     const { to: _target, ...data } = (msg.data as Record<string, string | number | boolean> | null) ?? {};
-    try {
-      await this.engine.comment(task.id, {
+    await this.engine.comment(
+      task.id,
+      {
         from: msg.stage ?? task.stage ?? task.phase,
         to,
         note: msg.note,
         data: { agent: msg.sender, ...data },
-      });
-    } catch {
-      /* best-effort */
-    }
-    this.engine.feed.append({
-      taskId: task.id,
-      kind: "annotation",
-      actor: `agent:${msg.sender ?? "?"}`,
-      message: `${to ? `handoff → ${to}: ` : ""}${msg.note ?? "(handoff data)"}`,
-    });
+      },
+      {
+        feedMessage: `${to ? `handoff → ${to}: ` : ""}${msg.note ?? "(handoff data)"}`,
+        feedActor: `agent:${msg.sender ?? "?"}`,
+      },
+    );
   }
 
   private reject(msg: InboxMessage, reason: string): void {

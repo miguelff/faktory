@@ -14,11 +14,18 @@ class FakeSource implements WorkSource {
   owners: Record<string, string> = {};
   statuses: Record<string, string> = {};
   comments: Array<{ id: string; body: string }> = [];
+  /** Project the live owner/status maps onto an item, as a real source would. */
+  private project(i: WorkItem): WorkItem {
+    return { ...i, status: this.statuses[i.id] ?? i.status, ownedBy: this.owners[i.id] ?? i.ownedBy ?? null };
+  }
   async listCandidates() {
-    return this.items.filter((i) => !this.owners[i.id] || this.owners[i.id] === "faktory-test");
+    return this.items
+      .filter((i) => !this.owners[i.id] || this.owners[i.id] === "faktory-test")
+      .map((i) => this.project(i));
   }
   async getItem(id: string) {
-    return this.items.find((i) => i.id === id) ?? null;
+    const i = this.items.find((i) => i.id === id);
+    return i ? this.project(i) : null;
   }
   async details(id: string) {
     const item = this.items.find((i) => i.id === id);
@@ -77,7 +84,7 @@ function harness(now: () => number = Date.now) {
   const db = openDb(":memory:");
   db.prepare("INSERT INTO sources (id, kind, config) VALUES ('primary','fake','{}')").run();
   const source = new FakeSource();
-  const engine = new Engine(db, source, { prefix: "faktory-test" });
+  const engine = new Engine(db, source, { prefix: "faktory-test" }, now);
   const dispatcher = new FakeDispatcher();
   const loop = new Loop(
     engine,
@@ -306,19 +313,36 @@ test("handoff payloads are injected into the next stage's prompt trail", async (
   assert.ok(source.comments.some((c) => c.body.includes("SHAPED-SPEC-XYZ")), "annotated on the source");
 });
 
-test("the datasource is authoritative: a transition writes faktory_status before the projection", async () => {
-  const h = harness();
-  const { engine, source } = h;
+test("a datasource write is acknowledged-and-retried: the projection never advances ahead of it", async () => {
+  let clock = 1_000_000;
+  const h = harness(() => clock);
+  const { engine, source, loop } = h;
   const t = await seedInShape(h, [item("n1", "One", 5)]);
-  // Make the next datasource write fail: the local projection must NOT advance
-  // ahead of the source of truth.
+  // The datasource is unavailable: the write must NOT be lost, NOT applied
+  // locally, and NOT rejected — it is queued and retried.
   const realSet = source.setStatus.bind(source);
   source.setStatus = async () => {
     throw new Error("notion down");
   };
-  await assert.rejects(() => engine.transition(t.id, "execute", "tui"));
-  assert.equal(engine.tasks.byId(1)!.phase, "shape", "projection stayed put when the datasource write failed");
+  await engine.transition(t.id, "execute", "tui"); // does not throw — queued
+  assert.equal(engine.tasks.byId(1)!.phase, "shape", "projection stayed put while the datasource write is pending");
+  assert.equal(engine.outbox.pending().length, 1, "the write is durably queued");
+  assert.ok(
+    engine.errors.open().some((e) => e.kind === "write-through"),
+    "the failing write-through is flagged in the local error log",
+  );
+
+  // The datasource recovers; once the backoff elapses the next flush
+  // acknowledges the write and only then projects it locally, resolving the
+  // error.
   source.setStatus = realSet;
+  clock += 60_000; // let the retry backoff elapse
+  await engine.flushOutbox();
+  assert.equal(engine.tasks.byId(1)!.phase, "execute", "projected once the datasource acknowledged");
+  assert.equal(source.statuses.n1, "execute", "the datasource holds the new status");
+  assert.equal(engine.outbox.pending().length, 0, "nothing left pending");
+  assert.equal(engine.errors.open().length, 0, "the write-through error was resolved on acknowledgement");
+  void loop;
 });
 
 test("a rebuilt projection recovers an owned task's phase from the datasource", async () => {
@@ -450,4 +474,65 @@ test("a healthy assignment is never repaired", async () => {
   assert.equal(after.agentName, t.agentName);
   assert.equal(after.dispatchedAt, t.dispatchedAt, "not re-dispatched");
   assert.ok(!engine.feed.recent(20).some((e) => e.kind === "repair"));
+});
+
+// --- remote proxy: write-through + CAS + reconciliation --------------------
+
+test("a lost CAS archives the task and flags a cas error in the local log", async () => {
+  const h = harness();
+  const { engine, source, loop } = h;
+  source.items = [item("n1", "One", 5)];
+  await loop.tick(); // discovered → backlog
+  // Another instance claimed the entry first.
+  source.owners.n1 = "faktory-other";
+  await assert.rejects(() => engine.transition(1, "shape", "human"), /claimed by faktory-other/);
+  assert.equal(engine.tasks.byId(1)!.phase, "archived", "a lost claim drops the local task");
+  const cas = engine.errors.open().find((e) => e.kind === "cas");
+  assert.ok(cas, "the failed CAS is flagged in the error log");
+  assert.match(cas!.message, /faktory-other/);
+});
+
+test("a failed handoff comment is queued and retried, never silently dropped", async () => {
+  let clock = 1_000_000;
+  const h = harness(() => clock);
+  const { engine, source, loop } = h;
+  const t = await seedInShape(h, [item("n1", "One", 5)]);
+  const realComment = source.comment.bind(source);
+  source.comment = async () => {
+    throw new Error("comment API down");
+  };
+  handoff(engine, t, "execute", "shaped it");
+  await loop.tick(); // transition applies; the papertrail write fails → queued + flagged
+  assert.equal(engine.tasks.byId(1)!.phase, "execute", "the transition still advanced");
+  assert.ok(!source.comments.some((c) => c.body.includes("shaped it")), "comment not yet on the datasource");
+  assert.ok(
+    engine.errors.open().some((e) => e.kind === "write-through"),
+    "the dropped papertrail write is flagged in the local error log",
+  );
+
+  source.comment = realComment;
+  clock += 60_000;
+  await engine.flushOutbox();
+  assert.ok(source.comments.some((c) => c.body.includes("shaped it")), "papertrail written on retry");
+  assert.ok(!engine.errors.open().some((e) => e.kind === "write-through"), "the error resolves on acknowledgement");
+});
+
+test("reconcile flags a datasource/local mismatch and sweeps it once repaired", async () => {
+  const h = harness();
+  const { engine, source } = h;
+  await seedInShape(h, [item("n1", "One", 5)]); // local + datasource both 'shape'
+  assert.deepEqual(await engine.reconcile(), [], "consistent state flags nothing");
+
+  // An out-of-band edit drifts the datasource status away from the local phase.
+  source.statuses.n1 = "review";
+  const flagged = await engine.reconcile();
+  assert.ok(flagged.some((e) => e.kind === "reconcile" && /phase differs/.test(e.message)), "the drift is flagged");
+  assert.equal(engine.errors.openByKind("reconcile").length, 1, "one open reconcile error");
+  await engine.reconcile();
+  assert.equal(engine.errors.openByKind("reconcile").length, 1, "recurrence stays a single open row");
+
+  // Repair the drift: the next reconcile sweeps the stale error resolved.
+  source.statuses.n1 = "shape";
+  await engine.reconcile();
+  assert.equal(engine.errors.openByKind("reconcile").length, 0, "the resolved inconsistency is swept");
 });
